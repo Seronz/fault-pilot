@@ -1,152 +1,152 @@
-// Package executor mengeksekusi proposal remediation.
+// Package executor mengeksekusi aksi remediation.
 //
-// Executor hanya berinteraksi dengan Fault Injector (HTTP POST /control).
-// Tidak pernah mengakses host/container langsung (fail closed, tidak menyentuh host).
+// Ada beberapa jenis executor dengan tingkat risiko berbeda:
+//   - lab      : hanya HTTP POST /control ke Fault Injector (default, dummy tetap ada)
+//   - systemctl: `systemctl restart <service>` (host lokal)
+//   - kubectl  : `kubectl rollout restart deployment/<name> -n <ns>`
+//   - aws_ec2  : reboot instance lewat EC2API (mockable)
+//   - ansible  : `ansible-playbook <runbook> -l <target>`
+//
+// Semua executor WAJIB: cek policy (allowlist service/target) dulu, catat ke
+// journal SEBELUM dan SESUDAH eksekusi, fail closed, timeout, dan tidak pernah
+// memakai shell (`bash -c`). Argumen dibangun sebagai slice dan dijalankan
+// lewat exec.CommandContext agar tidak bisa disuntik shell.
 package executor
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"sync"
+	"fmt"
 	"time"
+
+	"github.com/seronz/fault-pilot/internal/audit"
+	"github.com/seronz/fault-pilot/internal/domain"
 )
 
 var (
-	ErrDependencyBusy  = errors.New("executor: dependency busy")
-	ErrExecutionFailed = errors.New("executor: execution failed")
+	// ErrDenied dikembalikan bila policy menolak aksi.
+	ErrDenied = errors.New("executor: action denied by policy")
+	// ErrInvalidAction dikembalikan bila aksi tidak lengkap/tidak valid.
+	ErrInvalidAction = errors.New("executor: invalid action")
+	// ErrRunbookNotAllowed dikembalikan bila runbook di luar allowlist.
+	ErrRunbookNotAllowed = errors.New("executor: runbook not allowed")
+	// ErrServiceNotAllowed dikembalikan bila service di luar allowlist.
+	ErrServiceNotAllowed = errors.New("executor: service not allowed")
+	// ErrNoAPI dikembalikan bila EC2API belum di-set.
+	ErrNoAPI = errors.New("executor: no EC2 API configured")
 )
 
-// ControlPayload sesuai dengan API Fault Injector.
-type ControlPayload struct {
-	Mode      string  `json:"mode,omitempty"`
-	LatencyMS int     `json:"latency_ms,omitempty"`
-	ErrorRate float64 `json:"error_rate,omitempty"`
+// Action adalah aksi remediation yang akan dieksekusi.
+type Action struct {
+	IncidentID  string            `json:"incident_id"`
+	EvidenceIDs []string          `json:"evidence_ids,omitempty"`
+	Type        string            `json:"type"`   // mis. "restart_service"
+	Target      string            `json:"target"` // mis. nama service/instance
+	Params      map[string]string `json:"params,omitempty"`
 }
 
-// Executor menjalankan aksi terhadap target.
-type Executor struct {
-	client   *http.Client
-	fiURL    string // URL Fault Injector, misal http://localhost:8081/control
-	deps     map[string]chan struct{}
-	mu       sync.Mutex
-	deadline time.Duration
+// Result adalah hasil eksekusi yang berhasil.
+type Result struct {
+	Executor string        `json:"executor"`
+	Output   string        `json:"output,omitempty"`
+	DryRun   bool          `json:"dry_run,omitempty"`
+	Duration time.Duration `json:"duration"`
 }
 
-// Option konfigurasi executor.
-type Option func(*Executor)
-
-// WithHTTPClient mengganti http client.
-func WithHTTPClient(c *http.Client) Option {
-	return func(e *Executor) {
-		if c != nil {
-			e.client = c
-		}
-	}
+// Executor menjalankan satu aksi remediation.
+type Executor interface {
+	Type() string      // "lab" | "systemctl" | "kubectl" | "aws_ec2" | "ansible"
+	RiskLevel() string // "low" | "medium" | "high"
+	Execute(ctx context.Context, a Action) (Result, error)
 }
 
-// WithFaultInjectorURL mengatur endpoint /control.
-func WithFaultInjectorURL(url string) Option { return func(e *Executor) { e.fiURL = url } }
-
-// WithDeadline mengatur timeout default eksekusi.
-func WithDeadline(d time.Duration) Option {
-	return func(e *Executor) {
-		if d > 0 {
-			e.deadline = d
-		}
-	}
+// Policy memvalidasi aksi sebelum eksekusi (fail closed). Implementasi
+// biasanya adalah *policy.Engine.
+type Policy interface {
+	Validate(ctx context.Context, p domain.Proposal) (bool, string)
 }
 
-// WithMaxConcurrencyPerDependency membatasi konkurensi per dependency.
-func WithMaxConcurrencyPerDependency(dep string, max int) Option {
-	return func(e *Executor) {
-		if max <= 0 {
-			max = 1
-		}
-		ch := make(chan struct{}, max)
-		e.mu.Lock()
-		e.deps[dep] = ch
-		e.mu.Unlock()
-	}
+// Journal mencatat siklus hidup aksi. Implementasi biasanya *audit.Journal.
+type Journal interface {
+	Start(ctx context.Context, a audit.Action) (domain.JournalEntry, error)
+	Succeed(ctx context.Context, actionID, msg string) (domain.JournalEntry, error)
+	Fail(ctx context.Context, actionID, msg string) (domain.JournalEntry, error)
 }
 
-// New membuat Executor baru.
-func New(opts ...Option) *Executor {
-	e := &Executor{
-		client: &http.Client{Timeout: 10 * time.Second},
-		fiURL:  "http://localhost:8081/control",
-		deps:   make(map[string]chan struct{}),
-	}
-	for _, opt := range opts {
-		opt(e)
-	}
-	if e.deadline <= 0 {
-		e.deadline = 5 * time.Second
-	}
-	return e
+// base adalah bagian bersama semua executor: metadata, policy, journal, timeout.
+type base struct {
+	typ     string
+	risk    string
+	timeout time.Duration
+	policy  Policy
+	journal Journal
 }
 
-func (e *Executor) acquire(ctx context.Context, dep string) (func(), error) {
+func (b *base) Type() string      { return b.typ }
+func (b *base) RiskLevel() string { return b.risk }
+
+// guarded menjalankan alur aman: policy -> journal (before) -> fn -> journal (after).
+//
+// Bila policy menolak, aksi tidak dijalankan. Bila journal gagal dicatat,
+// aksi tidak dijalankan (fail closed).
+func (b *base) guarded(ctx context.Context, a Action, fn func(ctx context.Context) (Result, error)) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	e.mu.Lock()
-	ch, ok := e.deps[dep]
-	if !ok {
-		ch = make(chan struct{}, 1)
-		e.deps[dep] = ch
-	}
-	e.mu.Unlock()
-
-	select {
-	case ch <- struct{}{}:
-		return func() { <-ch }, nil
-	case <-ctx.Done():
-		return nil, ErrDependencyBusy
-	}
-}
-
-// Execute menjalankan aksi. Hanya mengirim POST ke Fault Injector.
-// Tidak pernah menyentuh host.
-func (e *Executor) Execute(ctx context.Context, action, target, incidentID string) error {
-	if ctx == nil {
-		ctx = context.Background()
+	if a.Type == "" || a.Target == "" {
+		return Result{}, ErrInvalidAction
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, e.deadline)
-	defer cancel()
-
-	release, err := e.acquire(execCtx, target)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	payload := ControlPayload{Mode: action}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(execCtx, http.MethodPost, e.fiURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ErrExecutionFailed
+	if b.policy != nil {
+		ok, reason := b.policy.Validate(ctx, domain.Proposal{
+			IncidentID:  a.IncidentID,
+			EvidenceIDs: a.EvidenceIDs,
+			Action:      a.Type,
+			Target:      a.Target,
+			Reason:      a.Params["reason"],
+		})
+		if !ok {
+			return Result{}, fmt.Errorf("%w: %s", ErrDenied, reason)
 		}
-		return ErrExecutionFailed
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ErrExecutionFailed
+	// Catat SEBELUM eksekusi.
+	var entry domain.JournalEntry
+	if b.journal != nil {
+		e, err := b.journal.Start(ctx, audit.Action{
+			IncidentID: a.IncidentID,
+			Action:     a.Type,
+			Target:     a.Target,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		entry = e
 	}
-	return nil
+
+	runCtx := ctx
+	if b.timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, b.timeout)
+		defer cancel()
+	}
+
+	start := time.Now()
+	res, err := fn(runCtx)
+	res.Executor = b.typ
+	res.Duration = time.Since(start)
+
+	// Catat SESUDAH eksekusi.
+	if b.journal != nil {
+		if err != nil {
+			if _, jerr := b.journal.Fail(ctx, entry.ActionID, err.Error()); jerr != nil {
+				return res, jerr
+			}
+		} else {
+			if _, jerr := b.journal.Succeed(ctx, entry.ActionID, "ok"); jerr != nil {
+				return res, jerr
+			}
+		}
+	}
+	return res, err
 }

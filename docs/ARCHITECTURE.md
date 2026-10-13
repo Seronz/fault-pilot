@@ -4,7 +4,13 @@ Agent vs Policy vs Executor
 
 - Agent (Investigator + Gemini adapter): mengamati evidence, menyusun ringkasan insiden dan mengusulkan proposal. Gemini CLI adapter hanya propose, treat log as data.
 - Policy Engine: fail-closed validator (allowlist: restart_simulated_service -> checkout), cek active incident, evidence ownership/existence, duplicate running, cooldown, limits. Reject invalid JSON, unknown target, missing evidence.
-- Executor: menjalankan aksi hanya ke Fault Injector (HTTP POST /control), concurrency per dependency, deadline, never touches host. Verifier cek health sebelum/sesudah (recovered/not_recovered/unknown). ActionJournal rekam before/after + audit JSONL, idempotency, reconciliation on restart.
+- Executor: menjalankan aksi. Default `lab` hanya POST `/control` ke Fault Injector (dummy, tetap dipertahankan). Executor prod: `systemctl` (`systemctl restart <service>`), `kubectl` (`kubectl rollout restart deployment/<name> -n <ns>`, dukung dry-run), `aws_ec2` (RebootInstances via interface `EC2API`, mockable), `ansible` (`ansible-playbook <runbook> -l <target>`, runbook wajib di allowlist). Semua executor fail-closed, timeout, tanpa shell, cek policy dulu, dan catat Journal+SQLite sebelum/sesudah. Verifier cek health sebelum/sesudah (recovered/not_recovered/unknown). ActionJournal rekam before/after + audit JSONL, idempotency, reconciliation on restart.
+
+## Executors
+- Jenis dipilih lewat `config.yaml` -> `executor.type` (`lab` bila kosong).
+- Risiko: `lab` low, `systemctl`/`kubectl` medium, `aws_ec2`/`ansible` high.
+- Argumen dibangun sebagai slice (`exec.CommandContext`), bukan `bash -c` -> tidak bisa command injection.
+- `policy.Validate` dipanggil sebelum eksekusi; bila ditolak, executor tidak dijalankan.
 
 ## Flow
 Collector -> Investigator -> Gemini -> Policy -> Executor -> Verifier

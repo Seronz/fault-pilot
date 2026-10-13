@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/seronz/fault-pilot/internal/config"
+	"github.com/seronz/fault-pilot/internal/executor"
 	"github.com/seronz/fault-pilot/lab/faultinjector"
 )
 
@@ -24,6 +26,28 @@ func faultInjectorAddr() string {
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Muat konfigurasi executor (default: lab). Bila file tidak ada, default dipakai.
+	cfgPath := os.Getenv("FAULTPILOT_CONFIG")
+	if cfgPath == "" {
+		cfgPath = "config.yaml"
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		logger.Error("gagal memuat config", "path", cfgPath, "err", err)
+		os.Exit(1)
+	}
+	exec, err := executor.Build(executor.BuildConfig{
+		Type:            cfg.Executor.Type,
+		AllowedTargets:  cfg.Executor.Allowlist.Targets,
+		AllowedRunbooks: cfg.Executor.Allowlist.Runbooks,
+		FIURL:           cfg.Executor.FaultInjectorURL,
+	})
+	if err != nil {
+		logger.Error("gagal membangun executor", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("executor configured", "type", exec.Type(), "risk", exec.RiskLevel())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

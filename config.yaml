@@ -1,0 +1,16 @@
+# Konfigurasi Fault Pilot.
+#
+# executor.type menentukan jenis eksekutor remediation:
+#   lab       - POST /control ke Fault Injector (default, dummy; aman untuk uji)
+#   systemctl - systemctl restart <service>
+#   kubectl   - kubectl rollout restart deployment/<name> -n <ns>
+#   aws_ec2   - reboot instance EC2 (butuh EC2API)
+#   ansible   - ansible-playbook <runbook> -l <target>
+executor:
+  type: lab
+  allowlist:
+    targets:
+      - checkout
+    runbooks:
+      - runbooks/restart.yml
+  fault_injector_url: http://localhost:8081/control

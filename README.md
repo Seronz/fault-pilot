@@ -18,7 +18,10 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 | C04  | Policy Engine (`internal/policy`) | ✅ Selesai |
 | C05  | Journal + Audit (`internal/audit`) | ✅ Selesai |
 | C06  | Executor + Verifier + Investigation | ✅ Selesai |
-| C07+ | Gemini nyata + sinkronisasi lanjut | ⏳ Belum |
+| C07  | Gemini CLI Adapter (`internal/gemini`) | ✅ Selesai |
+| C08  | Final + Tests + Scenarios (`scenarios/`) | ✅ Selesai |
+| C09  | Incident Connectors (`internal/connectors`) | ✅ Selesai |
+| C10  | Prod Executors (systemctl/kubectl/ec2/ansible, lab kept) | ✅ Selesai |
 
 ## Struktur Direktori
 
@@ -29,18 +32,21 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 ├── internal/
 │   ├── domain/              # tipe data inti (Proposal, Event, Incident, Journal, ...)
 │   ├── connectors/          # pluggable incident sources (lab/prometheus/loki/pagerduty/cloudwatch)
+│   ├── config/              # loader config.yaml (executor.type, allowlist)
 │   ├── collector/           # penerima event: kanal terbatas + dedup
 │   ├── worker/              # worker pool (batas konkurensi)
 │   ├── store/               # penyimpanan SQLite (WAL): events, incidents, journal
 │   ├── audit/               # ActionJournal + audit trail JSONL
-│   ├── executor/            # eksekusi aksi ke Fault Injector (HTTP)
-│   ├── gemini/              # adapter proposal (FakeAdapter)
+│   ├── executor/            # executor aksi: lab, systemctl, kubectl, aws_ec2, ansible
+│   ├── gemini/              # adapter proposal (CLI Gemini)
 │   ├── investigation/       # membangun ringkasan insiden dari evidence
 │   ├── policy/              # validasi proposal (allowlist + aturan state)
 │   └── verifier/            # verifikasi hasil remediation (health check)
 ├── lab/
 │   └── faultinjector/       # layanan lab penyimulasi gangguan (HTTP)
+├── scenarios/               # skenario YAML (latency-spike, dependency-failure, retry-storm)
 ├── docs/                    # dokumentasi tambahan
+├── config.yaml              # konfigurasi executor
 ├── go.mod
 └── README.md
 ```
@@ -100,6 +106,51 @@ curl -s -X POST -d '{"mode":"error","error_rate":0.3}' localhost:8081/control
 > nginx (`sre_lab_fkkmk`). Untuk mengujinya, jalankan dengan
 > `FAULT_INJECTOR_ADDR=:18081`.
 
+## Executor (Lab + Prod)
+
+Executor menjalankan aksi remediation. Jenisnya diatur di `config.yaml`
+(`executor.type`). Executor `lab` adalah default dan **tidak dihapus**: ia hanya
+POST `/control` ke Fault Injector (aman, dummy) untuk pengujian.
+
+| Type        | Perintah / Aksi                                  | Risk   |
+| ----------- | ------------------------------------------------ | ------ |
+| `lab`       | `POST /control` ke Fault Injector                | low    |
+| `systemctl` | `systemctl restart <service>`                    | medium |
+| `kubectl`   | `kubectl rollout restart deployment/<name> -n <ns>` | medium |
+| `aws_ec2`   | EC2 `RebootInstances` (via interface `EC2API`)   | high   |
+| `ansible`   | `ansible-playbook <runbook> -l <target>`         | high   |
+
+Aturan keamanan untuk semua executor:
+- Cek **Policy Engine** dulu (allowlist service/target/runbook); ditolak = tidak dieksekusi.
+- Tulis ke **Journal + SQLite SEBELUM dan SESUDAH** eksekusi (audit trail).
+- **Fail closed**, ada **timeout**, dan **tanpa shell** (memakai
+  `exec.CommandContext` dengan argumen slice, bukan `bash -c`), sehingga tidak
+  bisa disuntik perintah.
+- `kubectl` mendukung `params.dry_run=true` → menambah `--dry-run=server`.
+
+Contoh `config.yaml`:
+
+```yaml
+executor:
+  type: systemctl
+  allowlist:
+    targets: [checkout]
+    runbooks: [runbooks/restart.yml]
+  fault_injector_url: http://localhost:8081/control
+```
+
+Contoh aksi (Go):
+
+```go
+exec, _ := executor.Build(executor.BuildConfig{
+    Type:           "systemctl",
+    AllowedTargets: []string{"checkout"},
+})
+_, err := exec.Execute(ctx, executor.Action{
+    IncidentID: "inc-1", Type: "restart_service", Target: "checkout",
+})
+```
+
 ## Pengujian
 
 ```bash
@@ -129,6 +180,8 @@ Daftar test penting:
 | T13  | `internal/investigation` | Evidence tidak berurutan tetap dirangkum. |
 | T14  | `internal/verifier`  | Tidak recovered, tidak ada retry tak terhingga. |
 | T16  | `internal/executor`  | Limit konkurensi per dependency untuk 2 insiden. |
+| -    | `internal/executor`  | systemctl/kubectl/ec2/ansible: allowlist, dry-run, journal before/after, anti-injection. |
+| -    | `internal/config`    | Load `config.yaml`; file hilang → default `lab`. |
 | -    | `internal/worker`    | Konkurensi tidak melebihi batas maksimum. |
 | -    | `internal/store`     | SQLite memakai WAL dan data tersimpan. |
 | -    | `lab/faultinjector`  | Perilaku tiap mode dan validasi `/control`. |
