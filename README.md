@@ -160,3 +160,15 @@ Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md), [`docs/ARCH
 ```json
 {"action_id":"...","idempotency_key":"...","state":"executing","incident_id":"inc-1","action":"restart_simulated_service","target":"checkout","updated_at":"2026-10-14T...Z"}
 ```
+
+
+## Fitur
+- **Fail-closed**: policy menolak proposal tidak valid, executor deadline + hold journal saat gagal.
+- **Bounded & dedup**: collector kanal 100, dedup by content, worker pool max 5.
+- **Safe proposal**: allowlist aksi/target, anti-double running, cooldown, limit per incident.
+- **Recoverable journal**: SQLite WAL + audit JSONL, reconcile state executing/pending -> unknown.
+- **Idempotent execution**: ActionJournal pakai IdempotencyKey.
+- **Audit trail**: setiap transisi state dicatat (fail-closed on write fail).
+- **Gemini CLI adapter**: timeout 10s, max 4KB, backoff+jitter 429, sanitasi evidence.
+- **Verifier**: health check before/after -> recovered/not_recovered/unknown.
+- **No K8s**: hanya HTTP + subprocess + SQLite.
