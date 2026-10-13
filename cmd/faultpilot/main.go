@@ -10,13 +10,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/seronz/fault-pilot/internal/collector"
 	"github.com/seronz/fault-pilot/internal/config"
+	"github.com/seronz/fault-pilot/internal/domain"
 	"github.com/seronz/fault-pilot/internal/executor"
+	"github.com/seronz/fault-pilot/internal/observability"
+	"github.com/seronz/fault-pilot/internal/store"
 	"github.com/seronz/fault-pilot/lab/faultinjector"
 )
 
 const defaultFaultInjectorAddr = ":8081"
 
+// faultInjectorAddr mengembalikan alamat listen fault injector.
 func faultInjectorAddr() string {
 	if addr := os.Getenv("FAULT_INJECTOR_ADDR"); addr != "" {
 		return addr
@@ -24,19 +29,28 @@ func faultInjectorAddr() string {
 	return defaultFaultInjectorAddr
 }
 
+// loadConfig memuat config.yaml (path bisa dioverride lewat FAULTPILOT_CONFIG).
+func loadConfig(logger *slog.Logger) (config.Config, error) {
+	path := os.Getenv("FAULTPILOT_CONFIG")
+	if path == "" {
+		path = "config.yaml"
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		logger.Error("gagal memuat config", "path", path, "err", err)
+		return config.Config{}, err
+	}
+	return cfg, nil
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// Muat konfigurasi executor (default: lab). Bila file tidak ada, default dipakai.
-	cfgPath := os.Getenv("FAULTPILOT_CONFIG")
-	if cfgPath == "" {
-		cfgPath = "config.yaml"
-	}
-	cfg, err := config.Load(cfgPath)
+	cfg, err := loadConfig(logger)
 	if err != nil {
-		logger.Error("gagal memuat config", "path", cfgPath, "err", err)
 		os.Exit(1)
 	}
+
 	exec, err := executor.Build(executor.BuildConfig{
 		Type:            cfg.Executor.Type,
 		AllowedTargets:  cfg.Executor.Allowlist.Targets,
@@ -52,15 +66,70 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	injector := faultinjector.New(logger)
+	// Store SQLite (juga dipakai untuk health check). Bila gagal, health check
+	// sqlite dilewati (fail closed untuk aksi, tidak mematikan observability).
+	var st *store.Store
+	if s, err := store.Open(ctx, cfg.Observability.StorePath); err != nil {
+		logger.Warn("store tidak tersedia, health check sqlite dilewati", "err", err)
+	} else {
+		st = s
+		defer st.Close()
+	}
 
+	// Collector menerima event lalu menuliskannya ke store.
+	processor := func(context.Context, domain.Event) error { return nil }
+	if st != nil {
+		processor = func(pctx context.Context, e domain.Event) error { return st.AppendEvent(pctx, e) }
+	}
+	col := collector.New(collector.DefaultBufferSize, collector.DefaultMaxConcurrent, processor, logger)
+	defer func() { _ = col.Close() }()
+
+	// Metrics (kedalaman antrean diambil dari collector saat scrape).
+	metrics := observability.NewMetrics(observability.WithQueueDepthFunc(col.Len))
+	// Bungkus executor agar setiap eksekusi tercatat (actions_total + duration).
+	_ = observability.InstrumentExecutor(exec, metrics)
+
+	// Heartbeat "poll terakhir" (nanti diperbarui oleh connector poller).
+	heartbeat := &observability.Heartbeat{}
+	heartbeat.Mark()
+	maxPoll, perr := time.ParseDuration(cfg.Observability.LastPollMax)
+	if perr != nil || maxPoll <= 0 {
+		maxPoll = 2 * time.Minute
+	}
+
+	// Health checker: deep check sqlite + worker + last poll.
+	checker := observability.NewChecker()
+	if st != nil {
+		checker.AddCheck("sqlite", st.Ping)
+	}
+	checker.AddCheck("worker", col.Healthy)
+	checker.AddCheck("last_poll", heartbeat.Probe(maxPoll))
+
+	// Self-monitoring: log WARN "self-degraded" bila antrean/error melewati ambang.
+	monitor := observability.NewSelfMonitor(logger, metrics, col.Len)
+	go monitor.Run(ctx)
+
+	// Server observability: /metrics, /healthz, /readyz.
+	obsSrv := &http.Server{
+		Addr:              cfg.Observability.MetricsAddr,
+		Handler:           observability.NewServer(metrics.Registry(), checker).Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		logger.Info("observability listening", "addr", cfg.Observability.MetricsAddr)
+		if err := obsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("observability server error", "err", err)
+		}
+	}()
+
+	// Server fault injector (lab).
+	injector := faultinjector.New(logger)
 	addr := faultInjectorAddr()
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           injector.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("fault injector listening", "addr", addr)
@@ -68,6 +137,9 @@ func main() {
 			errCh <- err
 		}
 	}()
+
+	// Sistem siap menerima insiden setelah kedua server berjalan.
+	checker.SetReady(true)
 
 	select {
 	case <-ctx.Done():
@@ -77,11 +149,14 @@ func main() {
 		stop()
 	}
 
+	checker.SetReady(false)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+		logger.Error("injector shutdown failed", "err", err)
 	}
-	logger.Info("fault injector stopped")
+	if err := obsSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("observability shutdown failed", "err", err)
+	}
+	logger.Info("stopped")
 }

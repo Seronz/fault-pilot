@@ -22,6 +22,7 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 | C08  | Final + Tests + Scenarios (`scenarios/`) | ✅ Selesai |
 | C09  | Incident Connectors (`internal/connectors`) | ✅ Selesai |
 | C10  | Prod Executors (systemctl/kubectl/ec2/ansible, lab kept) | ✅ Selesai |
+| C11  | Observability (`internal/observability`) | ✅ Selesai |
 
 ## Struktur Direktori
 
@@ -40,13 +41,15 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 │   ├── executor/            # executor aksi: lab, systemctl, kubectl, aws_ec2, ansible
 │   ├── gemini/              # adapter proposal (CLI Gemini)
 │   ├── investigation/       # membangun ringkasan insiden dari evidence
+│   ├── observability/       # metrik, tracing (trace id), health/self-monitor
 │   ├── policy/              # validasi proposal (allowlist + aturan state)
 │   └── verifier/            # verifikasi hasil remediation (health check)
 ├── lab/
 │   └── faultinjector/       # layanan lab penyimulasi gangguan (HTTP)
 ├── scenarios/               # skenario YAML (latency-spike, dependency-failure, retry-storm)
+├── dashboards/              # dashboard Grafana (faultpilot.json)
 ├── docs/                    # dokumentasi tambahan
-├── config.yaml              # konfigurasi executor
+├── config.yaml              # konfigurasi executor + observability
 ├── go.mod
 └── README.md
 ```
@@ -151,6 +154,40 @@ _, err := exec.Execute(ctx, executor.Action{
 })
 ```
 
+## Observability
+
+Fault Pilot mengekspos metrik, kesehatan, dan tracing untuk dirinya sendiri
+(tanpa dependensi eksternal — format teks Prometheus ditulis sendiri).
+
+| Endpoint   | Keterangan |
+| ---------- | ---------- |
+| `GET /metrics` | Metrik Prometheus (counter/gauge/histogram). |
+| `GET /healthz` | Deep check: SQLite (`Ping`), worker, freshness poll terakhir. `200`/`503`. |
+| `GET /readyz`  | Kesiapan service. `200`/`503`. |
+
+Metrik utama (prefix `faultpilot_`):
+- `incidents_total{source}` — insiden masuk per sumber.
+- `actions_total{executor,status}` — aksi remediation (success/failed/rejected).
+- `policy_rejections_total{reason}` — penolakan policy beserta alasannya.
+- `executor_duration_seconds{executor}` — histogram latensi eksekutor.
+- `worker_queue_depth` — kedalaman antrean worker (real-time).
+- `events_dropped_total` — event dibuang karena antrean penuh (fail closed).
+
+Self-monitoring: `SelfMonitor` memberi peringatan **self-degraded** bila
+kedalaman antrean > 90 atau error-rate aksi > 50% (fail closed, bukan sekadar
+log). Setiap insiden terkait `trace_id` (lihat `observability.WithTraceID`).
+
+Konfigurasi:
+
+```yaml
+observability:
+  metrics_addr: ":9090"
+  store_path: "faultpilot.db"
+  last_poll_max: "2m"
+```
+
+Dashboard Grafana siap impor ada di [`dashboards/faultpilot.json`](dashboards/faultpilot.json).
+
 ## Pengujian
 
 ```bash
@@ -184,6 +221,7 @@ Daftar test penting:
 | -    | `internal/config`    | Load `config.yaml`; file hilang → default `lab`. |
 | -    | `internal/worker`    | Konkurensi tidak melebihi batas maksimum. |
 | -    | `internal/store`     | SQLite memakai WAL dan data tersimpan. |
+| -    | `internal/observability` | Metrik/kontrol eksposisi, `/healthz`+`/readyz`, heartbeat, self-monitor, trace id, instrumentasi executor. |
 | -    | `lab/faultinjector`  | Perilaku tiap mode dan validasi `/control`. |
 
 ## Cara Kerja Singkat
@@ -225,4 +263,5 @@ Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md), [`docs/ARCH
 - **Audit trail**: setiap transisi state dicatat (fail-closed on write fail).
 - **Gemini CLI adapter**: timeout 10s, max 4KB, backoff+jitter 429, sanitasi evidence.
 - **Verifier**: health check before/after -> recovered/not_recovered/unknown.
+- **Observability**: `/metrics` (Prometheus text), `/healthz`+`/readyz`, trace_id, self-degraded warning, dashboard Grafana.
 - **No K8s**: hanya HTTP + subprocess + SQLite.

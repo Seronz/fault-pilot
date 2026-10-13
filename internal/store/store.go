@@ -259,3 +259,12 @@ func (s *Store) Close() error {
 	}
 	return s.db.Close()
 }
+
+// Ping memeriksa apakah koneksi database masih sehat (dipakai health check).
+func (s *Store) Ping(ctx context.Context) error {
+	if s.db == nil {
+		return errors.New("store: database belum dibuka")
+	}
+	var n int
+	return s.db.QueryRowContext(ctx, "SELECT 1").Scan(&n)
+}

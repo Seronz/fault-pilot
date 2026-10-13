@@ -232,3 +232,32 @@ func TestFakeAdapterProposalPassesPolicy(t *testing.T) {
 		t.Fatalf("proposal FakeAdapter harus lolos: %s", reason)
 	}
 }
+
+type fakeObserver struct {
+	mu      sync.Mutex
+	reasons []string
+}
+
+func (o *fakeObserver) PolicyRejection(reason string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.reasons = append(o.reasons, reason)
+}
+
+// Observer menerima alasan setiap penolakan policy.
+func TestObserver_RecordsRejections(t *testing.T) {
+	obs := &fakeObserver{}
+	eng := policy.NewWithConfig(testStore(), policy.Config{Observer: obs})
+
+	p := validProposal()
+	p.Target = "payments"
+	if ok, _ := eng.Validate(context.Background(), p); ok {
+		t.Fatal("target di luar allowlist harus ditolak")
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.reasons) != 1 || obs.reasons[0] != "target not allowed" {
+		t.Fatalf("reasons = %v", obs.reasons)
+	}
+}

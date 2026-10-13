@@ -39,6 +39,11 @@ type Store interface {
 	EventExists(ctx context.Context, id string) (bool, error)
 }
 
+// Observer menerima notifikasi saat proposal ditolak (mis. untuk metrics).
+type Observer interface {
+	PolicyRejection(reason string)
+}
+
 // Config mengatur allowlist dan aturan state. Field kosong memakai default.
 type Config struct {
 	AllowedActions        []string
@@ -46,6 +51,7 @@ type Config struct {
 	Cooldown              time.Duration
 	MaxActionsPerIncident int
 	Now                   func() time.Time // injectable untuk pengujian
+	Observer              Observer         // opsional, dipanggil saat penolakan
 }
 
 // Engine memvalidasi proposal dan melacak aksi yang sedang berjalan.
@@ -56,6 +62,7 @@ type Engine struct {
 	cooldown       time.Duration
 	maxPerIncident int
 	now            func() time.Time
+	observer       Observer
 
 	mu          sync.Mutex
 	running     map[string]struct{}  // insiden yang sedang dieksekusi
@@ -91,6 +98,7 @@ func NewWithConfig(st Store, cfg Config) *Engine {
 		cooldown:       cfg.Cooldown,
 		maxPerIncident: cfg.MaxActionsPerIncident,
 		now:            cfg.Now,
+		observer:       cfg.Observer,
 		running:        make(map[string]struct{}),
 		lastAction:     make(map[string]time.Time),
 		actionCount:    make(map[string]int),
@@ -111,7 +119,7 @@ func (e *Engine) ValidateJSON(ctx context.Context, raw []byte) (bool, string) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
-		return false, "invalid json"
+		return e.reject("invalid json")
 	}
 	return e.Validate(ctx, p)
 }
@@ -120,31 +128,31 @@ func (e *Engine) ValidateJSON(ctx context.Context, raw []byte) (bool, string) {
 // dieksekusi ganda. Mengembalikan (true, "ok") atau (false, alasan).
 func (e *Engine) Validate(ctx context.Context, p domain.Proposal) (bool, string) {
 	if e.st == nil {
-		return false, "no store"
+		return e.reject("no store")
 	}
 	if p.IncidentID == "" {
-		return false, "missing incident id"
+		return e.reject("missing incident id")
 	}
 	if _, ok := e.allowedActions[p.Action]; !ok {
-		return false, "action not allowed"
+		return e.reject("action not allowed")
 	}
 	if _, ok := e.allowedTargets[p.Target]; !ok {
-		return false, "target not allowed"
+		return e.reject("target not allowed")
 	}
 	if len(p.EvidenceIDs) == 0 {
-		return false, "missing evidence"
+		return e.reject("missing evidence")
 	}
 
 	// Insiden harus ada dan masih aktif.
 	inc, ok, err := e.st.Incident(ctx, p.IncidentID)
 	if err != nil {
-		return false, "store error"
+		return e.reject("store error")
 	}
 	if !ok {
-		return false, "incident not found"
+		return e.reject("incident not found")
 	}
 	if inc.Status != ActiveStatus {
-		return false, "incident not active"
+		return e.reject("incident not active")
 	}
 
 	// Setiap bukti harus milik insiden dan ada di store.
@@ -154,14 +162,14 @@ func (e *Engine) Validate(ctx context.Context, p domain.Proposal) (bool, string)
 	}
 	for _, id := range p.EvidenceIDs {
 		if _, ok := belongs[id]; !ok {
-			return false, "evidence not part of incident"
+			return e.reject("evidence not part of incident")
 		}
 		exists, err := e.st.EventExists(ctx, id)
 		if err != nil {
-			return false, "store error"
+			return e.reject("store error")
 		}
 		if !exists {
-			return false, "evidence not found"
+			return e.reject("evidence not found")
 		}
 	}
 
@@ -169,15 +177,15 @@ func (e *Engine) Validate(ctx context.Context, p domain.Proposal) (bool, string)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, busy := e.running[p.IncidentID]; busy {
-		return false, "action already running"
+		return e.reject("action already running")
 	}
 	if last, ok := e.lastAction[p.IncidentID]; ok {
 		if e.now().Sub(last) < e.cooldown {
-			return false, "cooldown active"
+			return e.reject("cooldown active")
 		}
 	}
 	if e.actionCount[p.IncidentID] >= e.maxPerIncident {
-		return false, "action limit reached"
+		return e.reject("action limit reached")
 	}
 
 	e.running[p.IncidentID] = struct{}{}
@@ -201,4 +209,12 @@ func (e *Engine) Abort(incidentID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.running, incidentID)
+}
+
+// reject mencatat penolakan ke observer (bila ada) lalu mengembalikan hasil.
+func (e *Engine) reject(reason string) (bool, string) {
+	if e.observer != nil {
+		e.observer.PolicyRejection(reason)
+	}
+	return false, reason
 }

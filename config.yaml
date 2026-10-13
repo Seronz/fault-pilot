@@ -14,3 +14,9 @@ executor:
     runbooks:
       - runbooks/restart.yml
   fault_injector_url: http://localhost:8081/control
+
+# Observability untuk Fault Pilot sendiri.
+observability:
+  metrics_addr: ":9090"      # GET /metrics, /healthz, /readyz
+  store_path: "faultpilot.db" # SQLite untuk deep health check
+  last_poll_max: "2m"        # /healthz gagal bila poll terakhir lebih lama dari ini

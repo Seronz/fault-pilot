@@ -11,6 +11,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -176,6 +177,26 @@ func (c *Collector) Len() int { return len(c.events) }
 
 // Cap mengembalikan kapasitas kanal event.
 func (c *Collector) Cap() int { return cap(c.events) }
+
+// Healthy memeriksa apakah worker pool masih responsif (tidak deadlocked).
+// Dipakai untuk health check (/healthz).
+func (c *Collector) Healthy(ctx context.Context) error {
+	select {
+	case <-c.done:
+		return errors.New("collector closed")
+	default:
+	}
+	done := make(chan struct{})
+	if !c.pool.Submit(ctx, func() { close(done) }) {
+		return errors.New("worker pool busy or closed")
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // Accepted mengembalikan total event yang diterima.
 func (c *Collector) Accepted() uint64 { return c.accepted.Load() }

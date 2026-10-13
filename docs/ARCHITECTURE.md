@@ -16,6 +16,15 @@ Agent vs Policy vs Executor
 Collector -> Investigator -> Gemini -> Policy -> Executor -> Verifier
 Store(SQLite WAL) + ActionJournal maintain state.
 
+## Observability
+- `internal/observability` menyediakan registry metrik format teks Prometheus (tanpa dependensi eksternal): `Counter`, `CounterVec`, `Gauge`, `GaugeFunc`, `HistogramVec`.
+- Metrics Fault Pilot: `incidents_total{source}`, `actions_total{executor,status}`, `policy_rejections_total{reason}`, `executor_duration_seconds{executor}`, `worker_queue_depth`, `events_dropped_total`.
+- `policy.Config.Observer` diisi `Metrics.PolicyRejection(reason)` sehingga setiap penolakan tercatat beralasan.
+- `InstrumentExecutor` adalah decorator `executor.Executor` yang mengukur durasi dan status (success/failed/rejected) tanpa mengubah executor.
+- Server HTTP: `GET /metrics`, `GET /healthz` (deep check SQLite/worker/freshness poll), `GET /readyz`.
+- `Heartbeat` + `Checker` untuk health; `SelfMonitor` memberi peringatan `self-degraded` bila antrean > 90 atau error-rate aksi > 50%.
+- Tracing ringan: `trace_id` pada context (`observability.WithTraceID` / `TraceIDFrom` / `EnsureTraceID`) dan `LoggerWithTrace`.
+
 ## Audit log example
 {"action_id":"...","idempotency_key":"...","state":"executing","incident_id":"inc-1","action":"restart_simulated_service","target":"checkout","updated_at":"...Z"}
 

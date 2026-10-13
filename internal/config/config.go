@@ -34,12 +34,27 @@ type ExecutorConfig struct {
 
 // Config adalah konfigurasi tingkat atas.
 type Config struct {
-	Executor ExecutorConfig `yaml:"executor"`
+	Executor      ExecutorConfig      `yaml:"executor"`
+	Observability ObservabilityConfig `yaml:"observability"`
+}
+
+// ObservabilityConfig mengatur endpoint metrics/health dan store.
+type ObservabilityConfig struct {
+	MetricsAddr string `yaml:"metrics_addr"`  // alamat HTTP /metrics,/healthz,/readyz
+	StorePath   string `yaml:"store_path"`    // path SQLite untuk health check
+	LastPollMax string `yaml:"last_poll_max"` // durasi maksimum sejak poll terakhir
 }
 
 // Default mengembalikan konfigurasi default (executor lab).
 func Default() Config {
-	return Config{Executor: ExecutorConfig{Type: "lab"}}
+	return Config{
+		Executor: ExecutorConfig{Type: "lab"},
+		Observability: ObservabilityConfig{
+			MetricsAddr: ":9090",
+			StorePath:   "faultpilot.db",
+			LastPollMax: "2m",
+		},
+	}
 }
 
 // Load membaca config.yaml. Bila file tidak ada, Default() dikembalikan.
@@ -57,6 +72,15 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Executor.Type == "" {
 		cfg.Executor.Type = "lab"
+	}
+	if cfg.Observability.MetricsAddr == "" {
+		cfg.Observability.MetricsAddr = ":9090"
+	}
+	if cfg.Observability.StorePath == "" {
+		cfg.Observability.StorePath = "faultpilot.db"
+	}
+	if cfg.Observability.LastPollMax == "" {
+		cfg.Observability.LastPollMax = "2m"
 	}
 	return cfg, nil
 }
