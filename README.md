@@ -17,7 +17,8 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 | C03  | Collector + Worker + Store | ✅ Selesai |
 | C04  | Policy Engine (`internal/policy`) | ✅ Selesai |
 | C05  | Journal + Audit (`internal/audit`) | ✅ Selesai |
-| C06+ | Investigation, Executor, Verifier, Gemini (nyata) | ⏳ Belum |
+| C06  | Executor + Verifier + Investigation | ✅ Selesai |
+| C07+ | Gemini nyata + sinkronisasi lanjut | ⏳ Belum |
 
 ## Struktur Direktori
 
@@ -31,11 +32,11 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 │   ├── worker/              # worker pool (batas konkurensi)
 │   ├── store/               # penyimpanan SQLite (WAL): events, incidents, journal
 │   ├── audit/               # ActionJournal + audit trail JSONL
-│   ├── executor/            # (placeholder) eksekusi aksi
+│   ├── executor/            # eksekusi aksi ke Fault Injector (HTTP)
 │   ├── gemini/              # adapter proposal (FakeAdapter)
-│   ├── investigation/       # (placeholder) investigasi
+│   ├── investigation/       # membangun ringkasan insiden dari evidence
 │   ├── policy/              # validasi proposal (allowlist + aturan state)
-│   └── verifier/            # (placeholder) verifikasi hasil
+│   └── verifier/            # verifikasi hasil remediation (health check)
 ├── lab/
 │   └── faultinjector/       # layanan lab penyimulasi gangguan (HTTP)
 ├── docs/                    # dokumentasi tambahan
@@ -124,6 +125,9 @@ Daftar test penting:
 | T10  | `internal/audit`     | Proses mati setelah exec → state pulih, tidak dobel. |
 | T11  | `internal/audit`     | Gagal tulis audit/DB → aksi baru ditahan. |
 | T12  | `internal/collector` | Shutdown saat kanal penuh tidak menggantung. |
+| T13  | `internal/investigation` | Evidence tidak berurutan tetap dirangkum. |
+| T14  | `internal/verifier`  | Tidak recovered, tidak ada retry tak terhingga. |
+| T16  | `internal/executor`  | Limit konkurensi per dependency untuk 2 insiden. |
 | -    | `internal/worker`    | Konkurensi tidak melebihi batas maksimum. |
 | -    | `internal/store`     | SQLite memakai WAL dan data tersimpan. |
 | -    | `lab/faultinjector`  | Perilaku tiap mode dan validasi `/control`. |
