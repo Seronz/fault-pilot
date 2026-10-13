@@ -15,7 +15,9 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 | C01  | Bootstrap domain (`internal/domain`) | ✅ Selesai |
 | C02  | Fault Injector (`lab/faultinjector`) | ✅ Selesai |
 | C03  | Collector + Worker + Store | ✅ Selesai |
-| C04+ | Investigation, Policy, Executor, Verifier, Audit, Gemini | ⏳ Belum |
+| C04  | Policy Engine (`internal/policy`) | ✅ Selesai |
+| C05  | Journal + Audit (`internal/audit`) | ✅ Selesai |
+| C06+ | Investigation, Executor, Verifier, Gemini (nyata) | ⏳ Belum |
 
 ## Struktur Direktori
 
@@ -24,15 +26,15 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 ├── cmd/
 │   └── faultpilot/          # entry point aplikasi (menjalankan fault injector)
 ├── internal/
-│   ├── domain/              # tipe data inti (Proposal, Event, Incident, ActionResult)
+│   ├── domain/              # tipe data inti (Proposal, Event, Incident, Journal, ...)
 │   ├── collector/           # penerima event: kanal terbatas + dedup
 │   ├── worker/              # worker pool (batas konkurensi)
-│   ├── store/               # penyimpanan SQLite (WAL): tabel events & incidents
-│   ├── audit/               # (placeholder) logging audit
+│   ├── store/               # penyimpanan SQLite (WAL): events, incidents, journal
+│   ├── audit/               # ActionJournal + audit trail JSONL
 │   ├── executor/            # (placeholder) eksekusi aksi
-│   ├── gemini/              # (placeholder) adapter LLM
+│   ├── gemini/              # adapter proposal (FakeAdapter)
 │   ├── investigation/       # (placeholder) investigasi
-│   ├── policy/              # (placeholder) kebijakan/evaluasi
+│   ├── policy/              # validasi proposal (allowlist + aturan state)
 │   └── verifier/            # (placeholder) verifikasi hasil
 ├── lab/
 │   └── faultinjector/       # layanan lab penyimulasi gangguan (HTTP)
@@ -113,8 +115,14 @@ Daftar test penting:
 
 | Test | Lokasi | Yang diuji |
 | ---- | ------ | ---------- |
+| T02  | `internal/policy`    | Proposal valid lolos. |
+| T03  | `internal/policy`    | JSON tidak valid ditolak. |
+| T04  | `internal/policy`    | Target di luar allowlist ditolak. |
 | T05  | `internal/collector` | 100 event sama → 1 insiden (dedup). |
 | T06  | `internal/collector` | 1000 event konkuren tetap terbatas (bounded). |
+| T09  | `internal/policy`    | Dua worker pada insiden sama → tidak dobel. |
+| T10  | `internal/audit`     | Proses mati setelah exec → state pulih, tidak dobel. |
+| T11  | `internal/audit`     | Gagal tulis audit/DB → aksi baru ditahan. |
 | T12  | `internal/collector` | Shutdown saat kanal penuh tidak menggantung. |
 | -    | `internal/worker`    | Konkurensi tidak melebihi batas maksimum. |
 | -    | `internal/store`     | SQLite memakai WAL dan data tersimpan. |
@@ -127,9 +135,15 @@ Daftar test penting:
    (fail closed), tidak memblokir pemanggil.
 2. **Worker pool** (maksimum 5 konkuren) memproses event menjadi insiden.
 3. **Store** (SQLite mode WAL) menyimpan `events` dan `incidents`.
+4. **Policy Engine** memvalidasi proposal (allowlist aksi/target, insiden
+   aktif, bukti milik insiden, anti-dobel/cooldown/limit). Proposal tidak valid
+   tidak pernah dieksekusi.
+5. **ActionJournal** mencatat aksi ke SQLite sebelum dan sesudah eksekusi,
+   plus audit trail JSONL. Saat startup, `Reconcile` memulihkan aksi yang
+   terputus dan mencegah eksekusi ganda.
 
-Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md) dan
-[`docs/API.md`](docs/API.md).
+Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md),
+[`docs/API.md`](docs/API.md), dan [`docs/JOURNAL.md`](docs/JOURNAL.md).
 
 ## Aturan Desain
 

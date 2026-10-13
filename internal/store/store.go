@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -37,6 +38,17 @@ CREATE TABLE IF NOT EXISTS incidents (
 	status       TEXT NOT NULL,
 	evidence_ids TEXT NOT NULL DEFAULT '[]',
 	created_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS journal (
+	action_id       TEXT PRIMARY KEY,
+	idempotency_key TEXT NOT NULL UNIQUE,
+	incident_id     TEXT NOT NULL DEFAULT '',
+	action          TEXT NOT NULL DEFAULT '',
+	target          TEXT NOT NULL DEFAULT '',
+	state           TEXT NOT NULL,
+	message         TEXT NOT NULL DEFAULT '',
+	updated_at      INTEGER NOT NULL
 );
 `
 
@@ -145,6 +157,89 @@ func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// SaveJournalEntry menyimpan (upsert) satu baris jurnal berdasarkan action_id.
+func (s *Store) SaveJournalEntry(ctx context.Context, e domain.JournalEntry) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO journal (action_id, idempotency_key, incident_id, action, target, state, message, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(action_id) DO UPDATE SET
+		   state = excluded.state,
+		   message = excluded.message,
+		   updated_at = excluded.updated_at`,
+		e.ActionID, e.IdempotencyKey, e.IncidentID, e.Action, e.Target, string(e.State), e.Message, e.UpdatedAt.UTC().UnixNano(),
+	)
+	return err
+}
+
+// JournalEntry mengambil satu baris jurnal berdasarkan action_id.
+func (s *Store) JournalEntry(ctx context.Context, actionID string) (domain.JournalEntry, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT action_id, idempotency_key, incident_id, action, target, state, message, updated_at
+		 FROM journal WHERE action_id = ?`, actionID)
+	return scanJournal(row)
+}
+
+// JournalByKey mengambil satu baris jurnal berdasarkan idempotency_key.
+func (s *Store) JournalByKey(ctx context.Context, key string) (domain.JournalEntry, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT action_id, idempotency_key, incident_id, action, target, state, message, updated_at
+		 FROM journal WHERE idempotency_key = ?`, key)
+	return scanJournal(row)
+}
+
+// JournalByState mengembalikan semua baris jurnal dengan state tertentu.
+func (s *Store) JournalByState(ctx context.Context, states ...domain.JournalState) ([]domain.JournalEntry, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(states))
+	args := make([]any, len(states))
+	for i, st := range states {
+		placeholders[i] = "?"
+		args[i] = string(st)
+	}
+	query := `SELECT action_id, idempotency_key, incident_id, action, target, state, message, updated_at
+	          FROM journal WHERE state IN (` + strings.Join(placeholders, ",") + `) ORDER BY updated_at`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.JournalEntry
+	for rows.Next() {
+		e, _, err := scanJournal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// journalScanner menyatukan *sql.Row dan *sql.Rows.
+type journalScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJournal(sc journalScanner) (domain.JournalEntry, bool, error) {
+	var (
+		e         domain.JournalEntry
+		state     string
+		updatedAt int64
+	)
+	err := sc.Scan(&e.ActionID, &e.IdempotencyKey, &e.IncidentID, &e.Action, &e.Target, &state, &e.Message, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.JournalEntry{}, false, nil
+	}
+	if err != nil {
+		return domain.JournalEntry{}, false, err
+	}
+	e.State = domain.JournalState(state)
+	e.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return e, true, nil
 }
 
 // count adalah helper menghitung baris pada tabel (nama tabel dari konstanta

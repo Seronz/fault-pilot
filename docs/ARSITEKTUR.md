@@ -1,7 +1,7 @@
 # Arsitektur Fault Pilot
 
 Dokumen ini menjelaskan arsitektur internal, alur data, dan keputusan desain
-pada komponen yang sudah diimplementasikan (C01–C03).
+pada komponen yang sudah diimplementasikan (C01–C05).
 
 ## 1. Gambaran Umum
 
@@ -21,10 +21,17 @@ Fault Pilot dirancang sebagai pipeline penanganan insiden:
                                         └───────────────────────┘
                                                      │
                                                      ▼
-                                        ┌───────────────────────┐
+                                         ┌───────────────────────┐
                                         │   Store (SQLite WAL)   │
-                                        │  tabel events/incidents│
+                                        │ events/incidents/journal│
                                         └───────────────────────┘
+
+   Proposal ──▶ Policy Engine ──(lolos)──▶ ActionJournal ──▶ Eksekusi
+                    │                        (SQLite + JSONL)     │
+                 (tolak)                                          ▼
+                    │                                       Succeeded/Failed
+                    ▼                                       /Unknown
+             tidak dieksekusi                         Reconcile saat startup
 ```
 
 Fault Injector (`lab/faultinjector`) berdiri di sisi lain: ia adalah *target*
@@ -42,6 +49,7 @@ Tipe data inti tanpa dependensi infrastruktur:
 | `Event` | Satu kejadian/telemetri yang dikumpulkan. |
 | `Incident` | Kumpulan bukti yang jadi satu masalah. |
 | `ActionResult` | Hasil eksekusi sebuah proposal. |
+| `JournalState`/`JournalEntry` | Status dan catatan siklus hidup aksi. |
 
 Semua tipe memiliki tag JSON agar stabil saat serialisasi.
 
