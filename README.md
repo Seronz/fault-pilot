@@ -146,8 +146,7 @@ Daftar test penting:
    plus audit trail JSONL. Saat startup, `Reconcile` memulihkan aksi yang
    terputus dan mencegah eksekusi ganda.
 
-Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md),
-[`docs/API.md`](docs/API.md), dan [`docs/JOURNAL.md`](docs/JOURNAL.md).
+Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/API.md`](docs/API.md), dan [`docs/JOURNAL.md`](docs/JOURNAL.md).
 
 ## Aturan Desain
 
@@ -155,3 +154,9 @@ Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md),
   bukan memaksakan aksi.
 - **Tanpa Kubernetes**: tidak ada dependensi ke API k8s.
 - **Bounded**: antrean dan konkurensi selalu dibatasi.
+
+
+## Audit log (contoh)
+```json
+{"action_id":"...","idempotency_key":"...","state":"executing","incident_id":"inc-1","action":"restart_simulated_service","target":"checkout","updated_at":"2026-10-14T...Z"}
+```
