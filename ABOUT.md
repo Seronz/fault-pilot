@@ -1,27 +1,15 @@
-# Tentang Fault Pilot
+# About Fault Pilot
 
-Fault Pilot adalah sistem otomasi penanganan gangguan (incident response
-automation) berbasis fail-closed, tanpa dependensi Kubernetes.
+**What is**
+Fault Pilot is a fail-closed auto-remediation engine for simulating incident response — built for SWE tinkering, no k8s.
 
-## Tujuan
-- Mengurangi waktu respon terhadap gangguan dengan memproses event secara terkontrol.
-- Menjamin keamanan aksi (allowlist, cooldown, limit, anti-double execution).
-- Menyediakan audit trail dan pemulihan saat proses mati (reconciliation).
+**Why**
+To practice safe automation: validate proposals, prevent double execution, and fail closed instead of blindly firing actions.
 
-## Arsitektur Inti
-- **Collector**: menerima event, dedup, kanal terbatas.
-- **Policy Engine**: validasi proposal sebelum eksekusi.
-- **ActionJournal**: persist + audit trail JSONL, idempotensi & recovery.
-- **Executor**: mengirim aksi hanya ke Fault Injector (HTTP), kontrol konkurensi per dependency.
-- **Verifier**: verifikasi kesehatan sebelum/sesudah (health check).
-- **Investigator**: merangkum insiden dari evidence nyata.
+**How it works**
+- Event → Collector dedups (content-based) with bounded channel (100).
+- Policy checks allowlist + incident/evidence; ActionJournal tracks state before/after + JSONL audit.
+- Executor (HTTP-only, per-dependency semaphore) + Verifier (health before/after) drive remediation with idempotency + reconciliation.
 
-## Cara Menjalankan
-```bash
-go build ./...
-go test ./...
-go run ./cmd/faultpilot  # default :8081; FAULT_INJECTOR_ADDR untuk override
-```
-
-## Lisensi
-Proyek latihan/internal untuk penelitian dan pembelajaran.
+**Tech stack**
+Go 1.24.5 • SQLite (WAL) • bounded worker pool • CLI Gemini adapter • fail-closed design
