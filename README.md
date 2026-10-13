@@ -28,6 +28,7 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 │   └── faultpilot/          # entry point aplikasi (menjalankan fault injector)
 ├── internal/
 │   ├── domain/              # tipe data inti (Proposal, Event, Incident, Journal, ...)
+│   ├── connectors/          # pluggable incident sources (lab/prometheus/loki/pagerduty/cloudwatch)
 │   ├── collector/           # penerima event: kanal terbatas + dedup
 │   ├── worker/              # worker pool (batas konkurensi)
 │   ├── store/               # penyimpanan SQLite (WAL): events, incidents, journal
