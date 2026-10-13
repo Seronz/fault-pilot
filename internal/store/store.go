@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -114,6 +115,36 @@ func (s *Store) CountEvents(ctx context.Context) (int, error) {
 // CountIncidents mengembalikan jumlah baris pada tabel incidents.
 func (s *Store) CountIncidents(ctx context.Context) (int, error) {
 	return s.count(ctx, "incidents")
+}
+
+// Incident mengambil satu insiden berdasarkan ID. Nilai bool kedua bernilai
+// false bila insiden tidak ditemukan.
+func (s *Store) Incident(ctx context.Context, id string) (domain.Incident, bool, error) {
+	var status, evidenceJSON string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, evidence_ids FROM incidents WHERE id = ?`, id,
+	).Scan(&status, &evidenceJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Incident{}, false, nil
+	}
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+
+	var evidence []string
+	if err := json.Unmarshal([]byte(evidenceJSON), &evidence); err != nil {
+		return domain.Incident{}, false, fmt.Errorf("parse evidence: %w", err)
+	}
+	return domain.Incident{ID: id, Status: status, EvidenceIDs: evidence}, true, nil
+}
+
+// EventExists memeriksa apakah sebuah event dengan ID tertentu ada di store.
+func (s *Store) EventExists(ctx context.Context, id string) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM events WHERE id = ?`, id).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // count adalah helper menghitung baris pada tabel (nama tabel dari konstanta
