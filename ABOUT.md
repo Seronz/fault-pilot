@@ -1,15 +1,15 @@
 # About Fault Pilot
 
-**What is**
-Fault Pilot is a fail-closed auto-remediation engine for simulating incident response — built for SWE tinkering, no k8s.
+**Apa itu ini**
+Fault Pilot itu engine auto-remediation fail-closed buat simulasi handling incident — dibuat buat ngulik bareng, nggak butuh k8s.
 
-**Why**
-To practice safe automation: validate proposals, prevent double execution, and fail closed instead of blindly firing actions.
+**Kenapa bikin**
+Biar bisa latian safe automation: validasi proposal, cegah double execution, dan default-nya fail-closed (mending nolak ketimbang ngawur eksekusi).
 
-**How it works**
-- Event → Collector dedups (content-based) with bounded channel (100).
-- Policy checks allowlist + incident/evidence; ActionJournal tracks state before/after + JSONL audit.
-- Executor (HTTP-only, per-dependency semaphore) + Verifier (health before/after) drive remediation with idempotency + reconciliation.
+**Gimana cara kerjanya**
+- Event masuk → Collector dedup & masuk channel bounded (100).
+- Policy validasi allowlist + incident/evidence; ActionJournal catat state before/after + audit JSONL.
+- Executor (HTTP-only, per-dependency semaphore) + Verifier (health before/after) nentuin recovery, plus idempotency & reconciliation.
 
 **Tech stack**
 Go 1.24.5 • SQLite (WAL) • bounded worker pool • CLI Gemini adapter • fail-closed design
