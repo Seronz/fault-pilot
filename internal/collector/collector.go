@@ -1,3 +1,12 @@
+// Package collector menerima event masuk, membuang duplikat, lalu
+// mendistribusikannya ke worker pool untuk diproses menjadi insiden.
+//
+// Prinsip desain:
+//   - Fail closed: Push tidak pernah memblokir pemanggil. Bila kanal penuh
+//     atau collector sudah ditutup, event ditolak (return false).
+//   - Bounded: jumlah event yang menunggu dibatasi oleh kapasitas kanal
+//     (default 100) sehingga pemakaian memori terkendali.
+//   - Dedup: event dengan isi sama hanya diterima sekali.
 package collector
 
 import (
@@ -12,32 +21,45 @@ import (
 )
 
 const (
-	DefaultBufferSize    = 100
+	// DefaultBufferSize adalah kapasitas kanal event (batas antrean).
+	DefaultBufferSize = 100
+	// DefaultMaxConcurrent adalah jumlah maksimum insiden yang diproses
+	// secara bersamaan.
 	DefaultMaxConcurrent = 5
 )
 
+// Processor adalah fungsi yang memproses satu event. Implementasinya biasanya
+// menulis event ke store dan membuat/meng-update insiden.
 type Processor func(ctx context.Context, e domain.Event) error
 
+// Collector menerima event dan memprosesnya secara asinkron.
 type Collector struct {
-	events  chan domain.Event
-	pool    *worker.Pool
-	process Processor
+	events  chan domain.Event // kanal terbatas berisi event yang belum diproses
+	pool    *worker.Pool      // worker pool pembatas konkurensi
+	process Processor         // callback pemrosesan event
 	log     *slog.Logger
 
-	mu   sync.Mutex
-	seen map[string]struct{}
-	seq  atomic.Uint64
+	mu   sync.Mutex          // melindungi peta dedup
+	seen map[string]struct{} // kunci dedup yang sudah diterima
+	seq  atomic.Uint64       // penghitung untuk membangkitkan ID event
 
-	ctx    context.Context
+	ctx    context.Context // dibatalkan saat Close untuk membatalkan pekerjaan
 	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
-	wg     sync.WaitGroup
+	done   chan struct{}  // ditutup saat Close
+	once   sync.Once      // memastikan Close hanya dijalankan sekali
+	wg     sync.WaitGroup // menunggu goroutine consumer berhenti
 
-	accepted atomic.Uint64
-	dropped  atomic.Uint64
+	accepted atomic.Uint64 // jumlah event yang diterima
+	dropped  atomic.Uint64 // jumlah event yang ditolak karena kanal penuh
 }
 
+// New membuat Collector baru dan langsung menjalankan goroutine consumer.
+//
+// Parameter:
+//   - size: kapasitas kanal event (<=0 memakai DefaultBufferSize).
+//   - maxConcurrent: batas proses bersamaan (<=0 memakai DefaultMaxConcurrent).
+//   - process: callback pemrosesan event (nil diabaikan/di-no-op).
+//   - logger: logger slog (nil memakai slog.Default()).
 func New(size, maxConcurrent int, process Processor, logger *slog.Logger) *Collector {
 	if size <= 0 {
 		size = DefaultBufferSize
@@ -68,12 +90,23 @@ func New(size, maxConcurrent int, process Processor, logger *slog.Logger) *Colle
 	return c
 }
 
+// Push mencoba memasukkan satu event ke antrean.
+//
+// Fungsi mengembalikan true bila event diterima, dan false bila:
+//   - event merupakan duplikat dari yang sudah pernah diterima, atau
+//   - kanal sedang penuh, atau
+//   - collector sudah ditutup.
+//
+// Push tidak pernah memblokir pemanggil.
 func (c *Collector) Push(e domain.Event) bool {
+	// Bangkitkan ID event bila belum ada, dengan format "ev-000001".
 	if e.ID == "" {
 		e.ID = fmt.Sprintf("ev-%06d", c.seq.Add(1))
 	}
 	key := dedupKey(e)
 
+	// Tandai sudah diterima lebih dulu agar request duplikat yang datang
+	// bersamaan ikut terbuang.
 	c.mu.Lock()
 	if _, ok := c.seen[key]; ok {
 		c.mu.Unlock()
@@ -82,6 +115,7 @@ func (c *Collector) Push(e domain.Event) bool {
 	c.seen[key] = struct{}{}
 	c.mu.Unlock()
 
+	// Tolak lebih awal bila collector sudah ditutup.
 	select {
 	case <-c.done:
 		c.forget(key)
@@ -89,6 +123,8 @@ func (c *Collector) Push(e domain.Event) bool {
 	default:
 	}
 
+	// Kirim tanpa memblokir; bila penuh, kembalikan tanda dedup agar event
+	// bisa dicoba lagi di masa depan.
 	select {
 	case c.events <- e:
 		c.accepted.Add(1)
@@ -100,6 +136,8 @@ func (c *Collector) Push(e domain.Event) bool {
 	}
 }
 
+// run adalah goroutine consumer yang membaca event dari kanal lalu
+// menyerahkannya ke worker pool.
 func (c *Collector) run() {
 	defer c.wg.Done()
 	for {
@@ -117,8 +155,14 @@ func (c *Collector) run() {
 	}
 }
 
+// Close menghentikan penerimaan event baru dan menunggu semua pekerjaan
+// yang sedang berjalan selesai. Setelah Close, Push selalu mengembalikan false.
+//
+// Close aman dipanggil lebih dari sekali.
 func (c *Collector) Close() error {
 	c.once.Do(func() {
+		// Batalkan context lebih dulu agar Submit yang sedang menunggu slot
+		// ikut berhenti, lalu sinyalkan consumer untuk keluar.
 		c.cancel()
 		close(c.done)
 	})
@@ -127,18 +171,27 @@ func (c *Collector) Close() error {
 	return nil
 }
 
+// Len mengembalikan jumlah event yang sedang menunggu di kanal.
 func (c *Collector) Len() int { return len(c.events) }
+
+// Cap mengembalikan kapasitas kanal event.
 func (c *Collector) Cap() int { return cap(c.events) }
 
+// Accepted mengembalikan total event yang diterima.
 func (c *Collector) Accepted() uint64 { return c.accepted.Load() }
-func (c *Collector) Dropped() uint64  { return c.dropped.Load() }
 
+// Dropped mengembalikan total event yang ditolak karena kanal penuh.
+func (c *Collector) Dropped() uint64 { return c.dropped.Load() }
+
+// forget menghapus kunci dedup, dipakai saat event gagal dikirim ke kanal.
 func (c *Collector) forget(key string) {
 	c.mu.Lock()
 	delete(c.seen, key)
 	c.mu.Unlock()
 }
 
+// dedupKey membangun kunci dedup dari isi event.
+// ID dan Timestamp sengaja diabaikan agar event dengan isi sama dianggap duplikat.
 func dedupKey(e domain.Event) string {
 	return e.Type + "\x00" + e.Service + "\x00" + e.Message
 }
