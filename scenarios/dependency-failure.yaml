@@ -1,0 +1,5 @@
+name: dependency-failure
+description: Simulate dependency failure
+steps:
+  - inject:
+      mode: unhealthy

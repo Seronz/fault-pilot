@@ -1,0 +1,6 @@
+name: latency-spike
+description: Simulate checkout latency
+steps:
+  - inject:
+      mode: latency
+      latency_ms: 200

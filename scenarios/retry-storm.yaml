@@ -1,0 +1,6 @@
+name: retry-storm
+description: Simulate retry storm scenario
+steps:
+  - inject:
+      mode: error
+      error_rate: 0.5
