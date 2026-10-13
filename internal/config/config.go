@@ -32,10 +32,20 @@ type ExecutorConfig struct {
 	FaultInjectorURL string    `yaml:"fault_injector_url"`
 }
 
+// ApprovalConfig mengatur RBAC & Human Approval Gate.
+type ApprovalConfig struct {
+	Enabled      bool     `yaml:"enabled"`       // aktifkan gate? default true
+	Addr         string   `yaml:"addr"`          // alamat HTTP API approval, default :8082
+	RBACPath     string   `yaml:"rbac_path"`     // path config/rbac.yaml
+	RequireRisks []string `yaml:"require_risks"` // risk wajib approval, default [high]
+	TTL          string   `yaml:"ttl"`           // masa berlaku approval, default 15m
+}
+
 // Config adalah konfigurasi tingkat atas.
 type Config struct {
 	Executor      ExecutorConfig      `yaml:"executor"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Approval      ApprovalConfig      `yaml:"approval"`
 }
 
 // ObservabilityConfig mengatur endpoint metrics/health dan store.
@@ -53,6 +63,13 @@ func Default() Config {
 			MetricsAddr: ":9090",
 			StorePath:   "faultpilot.db",
 			LastPollMax: "2m",
+		},
+		Approval: ApprovalConfig{
+			Enabled:      true,
+			Addr:         ":8082",
+			RBACPath:     "config/rbac.yaml",
+			RequireRisks: []string{"high"},
+			TTL:          "15m",
 		},
 	}
 }
@@ -81,6 +98,18 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Observability.LastPollMax == "" {
 		cfg.Observability.LastPollMax = "2m"
+	}
+	if cfg.Approval.RBACPath == "" {
+		cfg.Approval.RBACPath = "config/rbac.yaml"
+	}
+	if cfg.Approval.Addr == "" {
+		cfg.Approval.Addr = ":8082"
+	}
+	if cfg.Approval.RequireRisks == nil {
+		cfg.Approval.RequireRisks = []string{"high"}
+	}
+	if cfg.Approval.TTL == "" {
+		cfg.Approval.TTL = "15m"
 	}
 	return cfg, nil
 }

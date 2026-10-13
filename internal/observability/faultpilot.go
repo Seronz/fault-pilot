@@ -21,6 +21,8 @@ type Metrics struct {
 	WorkerQueueDepth *GaugeFunc
 	// EventsDroppedTotal menghitung event yang ditolak karena antrean penuh.
 	EventsDroppedTotal *CounterVec
+	// ApprovalsTotal menghitung keputusan Human Approval Gate per status.
+	ApprovalsTotal *CounterVec
 }
 
 // MetricsOption mengonfigurasi Metrics.
@@ -49,6 +51,7 @@ func NewMetrics(opts ...MetricsOption) *Metrics {
 		PolicyRejectionsTotal:   NewCounterVec("faultpilot_policy_rejections_total", "Total penolakan policy, per alasan."),
 		ExecutorDurationSeconds: NewHistogramVec("faultpilot_executor_duration_seconds", "Durasi eksekusi executor.", DefaultBuckets),
 		EventsDroppedTotal:      NewCounterVec("faultpilot_events_dropped_total", "Total event ditolak karena antrean penuh."),
+		ApprovalsTotal:          NewCounterVec("faultpilot_approvals_total", "Keputusan Human Approval Gate, per status."),
 	}
 	qd := 0
 	if cfg.queueDepth != nil {
@@ -67,6 +70,7 @@ func NewMetrics(opts ...MetricsOption) *Metrics {
 	m.reg.Register(m.ExecutorDurationSeconds)
 	m.reg.Register(m.WorkerQueueDepth)
 	m.reg.Register(m.EventsDroppedTotal)
+	m.reg.Register(m.ApprovalsTotal)
 	return m
 }
 
@@ -100,6 +104,14 @@ func (m *Metrics) RecordEventDropped(source string) {
 
 // PolicyRejection memenuhi antarmuka policy.Observer.
 func (m *Metrics) PolicyRejection(reason string) { m.RecordRejection(reason) }
+
+// RecordApproval mencatat keputusan approval (approved|rejected|expired).
+func (m *Metrics) RecordApproval(status string) {
+	m.ApprovalsTotal.Inc(Labels{"status": status})
+}
+
+// ApprovalDecided memenuhi antarmuka approval.Observer.
+func (m *Metrics) ApprovalDecided(status string) { m.RecordApproval(status) }
 
 // ErrorRate menghitung rasio aksi gagal terhadap total (success+failed).
 // Mengembalikan 0 bila belum ada aksi.

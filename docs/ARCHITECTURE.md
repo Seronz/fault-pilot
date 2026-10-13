@@ -13,7 +13,7 @@ Agent vs Policy vs Executor
 - `policy.Validate` dipanggil sebelum eksekusi; bila ditolak, executor tidak dijalankan.
 
 ## Flow
-Collector -> Investigator -> Gemini -> Policy -> Executor -> Verifier
+Collector -> Investigator -> Gemini -> Policy -> (Human Approval) -> Executor -> Verifier
 Store(SQLite WAL) + ActionJournal maintain state.
 
 ## Observability
@@ -24,6 +24,14 @@ Store(SQLite WAL) + ActionJournal maintain state.
 - Server HTTP: `GET /metrics`, `GET /healthz` (deep check SQLite/worker/freshness poll), `GET /readyz`.
 - `Heartbeat` + `Checker` untuk health; `SelfMonitor` memberi peringatan `self-degraded` bila antrean > 90 atau error-rate aksi > 50%.
 - Tracing ringan: `trace_id` pada context (`observability.WithTraceID` / `TraceIDFrom` / `EnsureTraceID`) dan `LoggerWithTrace`.
+
+## RBAC & Human Approval Gate
+- `internal/approval` memuat RBAC dari `config/rbac.yaml`: `roles` (role -> permission `read`, `approve:low`, `approve:medium`, `approve:high`) dan `users` (email -> role). User dengan role tak dikenal => error (fail closed).
+- `approval.Gate` mengelola siklus hidup approval: `Request` (pending) -> `Approve`/`Reject` (wajib permission `approve:<risk>` + four-eyes) -> `Check` oleh policy (sekali pakai + cek kadaluarsa).
+- `policy.Config.RiskLevels` memetakan aksi -> risk (diisi dari `executor.RiskForType`); `RequireApprovalRisks` (default `[high]`) menentukan risk yang wajib approval; `Config.Approval` diisi `*approval.Gate`.
+- `policy.Validate`: untuk aksi yang wajib approval, gate dipanggil SEBELUM klaim state; gagal => reject (`approval required` / `approval not granted`). Approval tidak terpakai bila proposal tetap invalid.
+- HTTP API (`approval.Handler`): `GET/POST /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/approve|reject`. Identitas dari header `X-Actor`.
+- Keputusan approval masuk metrics `faultpilot_approvals_total{status}`.
 
 ## Audit log example
 {"action_id":"...","idempotency_key":"...","state":"executing","incident_id":"inc-1","action":"restart_simulated_service","target":"checkout","updated_at":"...Z"}

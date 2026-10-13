@@ -31,3 +31,20 @@ func TestBuild_UnknownType(t *testing.T) {
 		t.Fatalf("expected error for unknown type")
 	}
 }
+
+func TestRiskForType(t *testing.T) {
+	cases := map[string]string{
+		"":          "low",
+		"lab":       "low",
+		"systemctl": "medium",
+		"kubectl":   "medium",
+		"aws_ec2":   "high",
+		"ansible":   "high",
+		"bogus":     "high",
+	}
+	for typ, want := range cases {
+		if got := executor.RiskForType(typ); got != want {
+			t.Fatalf("RiskForType(%q) = %q, want %q", typ, got, want)
+		}
+	}
+}

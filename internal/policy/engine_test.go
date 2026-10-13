@@ -261,3 +261,84 @@ func TestObserver_RecordsRejections(t *testing.T) {
 		t.Fatalf("reasons = %v", obs.reasons)
 	}
 }
+
+type fakeGate struct {
+	grant        bool
+	calls        int
+	lastRisk     string
+	lastIncident string
+}
+
+func (f *fakeGate) Check(_ context.Context, incidentID, action, target, risk string) (bool, string) {
+	f.calls++
+	f.lastRisk = risk
+	f.lastIncident = incidentID
+	return f.grant, "fake"
+}
+
+func TestApproval_HighRiskRequiresGate(t *testing.T) {
+	gate := &fakeGate{grant: false}
+	eng := policy.NewWithConfig(testStore(), policy.Config{
+		RiskLevels: map[string]string{policy.ActionRestartSimulatedService: "high"},
+		Approval:   gate,
+	})
+
+	ok, reason := eng.Validate(context.Background(), validProposal())
+	if ok {
+		t.Fatal("aksi high-risk tanpa approval harus ditolak")
+	}
+	if reason != "approval not granted" {
+		t.Fatalf("reason = %q", reason)
+	}
+	if gate.calls != 1 {
+		t.Fatalf("gate.calls = %d, want 1", gate.calls)
+	}
+}
+
+func TestApproval_GrantedAllowsExecution(t *testing.T) {
+	gate := &fakeGate{grant: true}
+	eng := policy.NewWithConfig(testStore(), policy.Config{
+		RiskLevels: map[string]string{policy.ActionRestartSimulatedService: "high"},
+		Approval:   gate,
+	})
+
+	if ok, reason := eng.Validate(context.Background(), validProposal()); !ok {
+		t.Fatalf("dengan approval harus lolos: %s", reason)
+	}
+}
+
+func TestApproval_LowRiskDoesNotNeedGate(t *testing.T) {
+	eng := policy.NewWithConfig(testStore(), policy.Config{
+		RiskLevels: map[string]string{policy.ActionRestartSimulatedService: "low"},
+	})
+	if ok, reason := eng.Validate(context.Background(), validProposal()); !ok {
+		t.Fatalf("risk low tanpa gate harus lolos: %s", reason)
+	}
+}
+
+func TestApproval_RequiredButNoGateFailsClosed(t *testing.T) {
+	eng := policy.NewWithConfig(testStore(), policy.Config{
+		RiskLevels:           map[string]string{policy.ActionRestartSimulatedService: "high"},
+		RequireApprovalRisks: []string{"high"},
+	})
+	ok, reason := eng.Validate(context.Background(), validProposal())
+	if ok || reason != "approval required" {
+		t.Fatalf("ok=%v reason=%q, want reject approval required", ok, reason)
+	}
+}
+
+func TestApproval_NotCheckedWhenProposalInvalid(t *testing.T) {
+	gate := &fakeGate{grant: true}
+	eng := policy.NewWithConfig(testStore(), policy.Config{
+		RiskLevels: map[string]string{policy.ActionRestartSimulatedService: "high"},
+		Approval:   gate,
+	})
+	p := validProposal()
+	p.Target = "payments" // target tidak diizinkan
+	if ok, _ := eng.Validate(context.Background(), p); ok {
+		t.Fatal("target invalid harus ditolak")
+	}
+	if gate.calls != 0 {
+		t.Fatalf("gate tidak boleh dipanggil untuk proposal invalid (calls=%d)", gate.calls)
+	}
+}

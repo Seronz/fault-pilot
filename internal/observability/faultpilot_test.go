@@ -66,3 +66,15 @@ func TestMetrics_PolicyRejectionInterface(t *testing.T) {
 		t.Fatalf("rejection value = %v, want 1", got)
 	}
 }
+
+func TestMetrics_ApprovalInterface(t *testing.T) {
+	m := observability.NewMetrics()
+	m.ApprovalDecided("approved")
+	m.RecordApproval("rejected")
+	if got := m.ApprovalsTotal.Value(observability.Labels{"status": "approved"}); got != 1 {
+		t.Fatalf("approved = %v, want 1", got)
+	}
+	if got := m.ApprovalsTotal.Value(observability.Labels{"status": "rejected"}); got != 1 {
+		t.Fatalf("rejected = %v, want 1", got)
+	}
+}

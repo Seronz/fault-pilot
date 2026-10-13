@@ -1,0 +1,15 @@
+# RBAC untuk Human Approval Gate.
+#
+# roles: role -> daftar permission (read, approve:low, approve:medium, approve:high)
+# users: email -> role
+#
+# Fail closed: user tanpa role, role tak dikenal, atau approval kadaluarsa DITOLAK.
+roles:
+  viewer: [read]
+  sre: [read, approve:low, approve:medium]
+  sre_lead: [read, approve:low, approve:medium, approve:high]
+
+users:
+  ronz@company.com: sre_lead
+  sre@company.com: sre
+  viewer@company.com: viewer

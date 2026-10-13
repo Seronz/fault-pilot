@@ -22,7 +22,8 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 | C08  | Final + Tests + Scenarios (`scenarios/`) | ✅ Selesai |
 | C09  | Incident Connectors (`internal/connectors`) | ✅ Selesai |
 | C10  | Prod Executors (systemctl/kubectl/ec2/ansible, lab kept) | ✅ Selesai |
-| C11  | Observability (`internal/observability`) | ✅ Selesai |
+| C11  | Observability (metrics/tracing/health) | ✅ Selesai |
+| C12  | RBAC & Human Approval Gate (`internal/approval`) | ✅ Selesai |
 
 ## Struktur Direktori
 
@@ -32,6 +33,7 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 │   └── faultpilot/          # entry point aplikasi (menjalankan fault injector)
 ├── internal/
 │   ├── domain/              # tipe data inti (Proposal, Event, Incident, Journal, ...)
+│   ├── approval/            # RBAC + Human Approval Gate (approve:low/medium/high)
 │   ├── connectors/          # pluggable incident sources (lab/prometheus/loki/pagerduty/cloudwatch)
 │   ├── config/              # loader config.yaml (executor.type, allowlist)
 │   ├── collector/           # penerima event: kanal terbatas + dedup
@@ -49,7 +51,8 @@ dan mengeksekusi tindakan perbaikan secara terkendali.
 ├── scenarios/               # skenario YAML (latency-spike, dependency-failure, retry-storm)
 ├── dashboards/              # dashboard Grafana (faultpilot.json)
 ├── docs/                    # dokumentasi tambahan
-├── config.yaml              # konfigurasi executor + observability
+├── config/                  # config/rbac.yaml (roles + users)
+├── config.yaml              # konfigurasi executor + observability + approval
 ├── go.mod
 └── README.md
 ```
@@ -188,6 +191,66 @@ observability:
 
 Dashboard Grafana siap impor ada di [`dashboards/faultpilot.json`](dashboards/faultpilot.json).
 
+## RBAC & Human Approval Gate
+
+Aksi berisiko **tinggi tidak boleh dieksekusi otomatis**. Setiap aksi dengan risk
+tertentu wajib disetujui manusia yang berwenang. Prinsipnya fail closed: user
+tanpa role/permission, role tak dikenal, atau approval kadaluarsa => **DITOLAK**.
+
+RBAC dibaca dari `config/rbac.yaml`:
+
+```yaml
+roles:
+  viewer: [read]
+  sre: [read, approve:low, approve:medium]
+  sre_lead: [read, approve:low, approve:medium, approve:high]
+users:
+  ronz@company.com: sre_lead
+  sre@company.com: sre
+  viewer@company.com: viewer
+```
+
+Permission: `read`, `approve:low`, `approve:medium`, `approve:high`.
+
+Alur approval (HTTP API, default `:8082`):
+
+| Method | Path | Aksi | Permission |
+| ------ | ---- | ---- | ---------- |
+| `GET`  | `/approvals` | Daftar request (`?status=pending`) | `read` |
+| `POST` | `/approvals` | Buat permohonan approval | `read` |
+| `GET`  | `/approvals/{id}` | Lihat satu request | `read` |
+| `POST` | `/approvals/{id}/approve` | Setujui | `approve:<risk>` |
+| `POST` | `/approvals/{id}/reject` | Tolak | `approve:<risk>` |
+
+Identitas diambil dari header `X-Actor` (mis. dari SSO). Contoh:
+
+```bash
+# SRE meminta approval aksi high-risk
+curl -H 'X-Actor: sre@company.com' -X POST localhost:8082/approvals \
+  -d '{"incident_id":"inc-1","action":"restart_simulated_service","target":"checkout","risk":"high"}'
+
+# SRE lead menyetujui (four-eyes: approver != pemohon)
+curl -H 'X-Actor: ronz@company.com' -X POST localhost:8082/approvals/<id>/approve -d '{"note":"lgtm"}'
+```
+
+Aturan:
+- **Four-eyes**: pemohon tidak boleh menyetujui permohonannya sendiri.
+- **Sekali pakai**: approval yang dipakai policy langsung ditandai `consumed`.
+- **Kadaluarsa** (`ttl`, default 15 menit) => ditolak.
+- Policy Engine memanggil gate sebelum mengklaim insiden: risk yang wajib
+  approval (default `[high]`) tanpa approval => aksi tidak dijalankan.
+
+Konfigurasi:
+
+```yaml
+approval:
+  enabled: true
+  addr: ":8082"
+  rbac_path: "config/rbac.yaml"
+  require_risks: [high]
+  ttl: "15m"
+```
+
 ## Pengujian
 
 ```bash
@@ -222,6 +285,8 @@ Daftar test penting:
 | -    | `internal/worker`    | Konkurensi tidak melebihi batas maksimum. |
 | -    | `internal/store`     | SQLite memakai WAL dan data tersimpan. |
 | -    | `internal/observability` | Metrik/kontrol eksposisi, `/healthz`+`/readyz`, heartbeat, self-monitor, trace id, instrumentasi executor. |
+| -    | `internal/approval`  | RBAC (role/permission), gate approval (four-eyes, sekali pakai, kadaluarsa), HTTP API `/approvals`. |
+| -    | `internal/policy`    | Risk level + wajib approval untuk risk tertentu (fail closed). |
 | -    | `lab/faultinjector`  | Perilaku tiap mode dan validasi `/control`. |
 
 ## Cara Kerja Singkat
@@ -264,4 +329,5 @@ Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md), [`docs/ARCH
 - **Gemini CLI adapter**: timeout 10s, max 4KB, backoff+jitter 429, sanitasi evidence.
 - **Verifier**: health check before/after -> recovered/not_recovered/unknown.
 - **Observability**: `/metrics` (Prometheus text), `/healthz`+`/readyz`, trace_id, self-degraded warning, dashboard Grafana.
+- **RBAC + Human Approval**: aksi high-risk wajib disetujui `approve:high`; four-eyes, sekali pakai, kadaluarsa.
 - **No K8s**: hanya HTTP + subprocess + SQLite.

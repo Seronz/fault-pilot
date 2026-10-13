@@ -38,3 +38,18 @@ func Build(cfg BuildConfig) (Executor, error) {
 		return nil, fmt.Errorf("executor: unknown type %q", cfg.Type)
 	}
 }
+
+// RiskForType mengembalikan level risiko untuk sebuah tipe executor. Tipe yang
+// tidak dikenal dianggap "high" (fail closed).
+func RiskForType(typ string) string {
+	switch typ {
+	case "", "lab":
+		return "low"
+	case "systemctl", "kubectl":
+		return "medium"
+	case "aws_ec2", "ansible":
+		return "high"
+	default:
+		return "high"
+	}
+}

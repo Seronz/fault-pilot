@@ -20,3 +20,11 @@ observability:
   metrics_addr: ":9090"      # GET /metrics, /healthz, /readyz
   store_path: "faultpilot.db" # SQLite untuk deep health check
   last_poll_max: "2m"        # /healthz gagal bila poll terakhir lebih lama dari ini
+
+# RBAC & Human Approval Gate. Aksi berisiko tinggi wajib disetujui manusia.
+approval:
+  enabled: true
+  addr: ":8082"              # HTTP API approval (GET/POST /approvals)
+  rbac_path: "config/rbac.yaml"
+  require_risks: [high]      # risk yang wajib approval manusia
+  ttl: "15m"                 # masa berlaku sebuah approval

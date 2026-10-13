@@ -31,6 +31,9 @@ const (
 const (
 	DefaultCooldown              = 30 * time.Second
 	DefaultMaxActionsPerIncident = 1
+	// DefaultRequireApprovalRisk adalah risk yang secara default wajib disetujui
+	// manusia sebelum eksekusi.
+	DefaultRequireApprovalRisk = "high"
 )
 
 // Store adalah bagian store yang dibutuhkan policy engine.
@@ -44,25 +47,38 @@ type Observer interface {
 	PolicyRejection(reason string)
 }
 
+// ApprovalGate memeriksa apakah aksi pada risk tertentu sudah disetujui manusia.
+// Implementasi biasanya *approval.Gate. Bila dipanggil, approval yang cocok
+// ditandai terpakai (sekali pakai).
+type ApprovalGate interface {
+	Check(ctx context.Context, incidentID, action, target, risk string) (bool, string)
+}
+
 // Config mengatur allowlist dan aturan state. Field kosong memakai default.
 type Config struct {
 	AllowedActions        []string
 	AllowedTargets        []string
 	Cooldown              time.Duration
 	MaxActionsPerIncident int
-	Now                   func() time.Time // injectable untuk pengujian
-	Observer              Observer         // opsional, dipanggil saat penolakan
+	Now                   func() time.Time  // injectable untuk pengujian
+	Observer              Observer          // opsional, dipanggil saat penolakan
+	RiskLevels            map[string]string // action -> "low"|"medium"|"high" (kosong = low)
+	RequireApprovalRisks  []string          // risk yang wajib approval; nil -> ["high"]
+	Approval              ApprovalGate      // gate approval manusia (opsional)
 }
 
 // Engine memvalidasi proposal dan melacak aksi yang sedang berjalan.
 type Engine struct {
-	st             Store
-	allowedActions map[string]struct{}
-	allowedTargets map[string]struct{}
-	cooldown       time.Duration
-	maxPerIncident int
-	now            func() time.Time
-	observer       Observer
+	st              Store
+	allowedActions  map[string]struct{}
+	allowedTargets  map[string]struct{}
+	cooldown        time.Duration
+	maxPerIncident  int
+	now             func() time.Time
+	observer        Observer
+	riskLevels      map[string]string
+	requireApproval map[string]struct{}
+	approval        ApprovalGate
 
 	mu          sync.Mutex
 	running     map[string]struct{}  // insiden yang sedang dieksekusi
@@ -87,27 +103,43 @@ func NewWithConfig(st Store, cfg Config) *Engine {
 	if cfg.MaxActionsPerIncident <= 0 {
 		cfg.MaxActionsPerIncident = DefaultMaxActionsPerIncident
 	}
+	if cfg.RequireApprovalRisks == nil {
+		cfg.RequireApprovalRisks = []string{DefaultRequireApprovalRisk}
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
 
 	e := &Engine{
-		st:             st,
-		allowedActions: make(map[string]struct{}, len(cfg.AllowedActions)),
-		allowedTargets: make(map[string]struct{}, len(cfg.AllowedTargets)),
-		cooldown:       cfg.Cooldown,
-		maxPerIncident: cfg.MaxActionsPerIncident,
-		now:            cfg.Now,
-		observer:       cfg.Observer,
-		running:        make(map[string]struct{}),
-		lastAction:     make(map[string]time.Time),
-		actionCount:    make(map[string]int),
+		st:              st,
+		allowedActions:  make(map[string]struct{}, len(cfg.AllowedActions)),
+		allowedTargets:  make(map[string]struct{}, len(cfg.AllowedTargets)),
+		cooldown:        cfg.Cooldown,
+		maxPerIncident:  cfg.MaxActionsPerIncident,
+		now:             cfg.Now,
+		observer:        cfg.Observer,
+		approval:        cfg.Approval,
+		riskLevels:      make(map[string]string, len(cfg.RiskLevels)),
+		requireApproval: make(map[string]struct{}, len(cfg.RequireApprovalRisks)),
+		running:         make(map[string]struct{}),
+		lastAction:      make(map[string]time.Time),
+		actionCount:     make(map[string]int),
 	}
 	for _, a := range cfg.AllowedActions {
 		e.allowedActions[a] = struct{}{}
 	}
 	for _, t := range cfg.AllowedTargets {
 		e.allowedTargets[t] = struct{}{}
+	}
+	for action, risk := range cfg.RiskLevels {
+		if risk != "" {
+			e.riskLevels[action] = risk
+		}
+	}
+	for _, r := range cfg.RequireApprovalRisks {
+		if r != "" {
+			e.requireApproval[r] = struct{}{}
+		}
 	}
 	return e
 }
@@ -173,6 +205,19 @@ func (e *Engine) Validate(ctx context.Context, p domain.Proposal) (bool, string)
 		}
 	}
 
+	// Human Approval Gate: aksi berisiko tertentu wajib disetujui manusia.
+	// Diperiksa sebelum klaim state agar approval tidak terpakai untuk proposal
+	// yang tetap akan ditolak.
+	if risk, need := e.approvalRequirement(p.Action); need {
+		if e.approval == nil {
+			return e.reject("approval required")
+		}
+		ok, _ := e.approval.Check(ctx, p.IncidentID, p.Action, p.Target, risk)
+		if !ok {
+			return e.reject("approval not granted")
+		}
+	}
+
 	// Aturan state diperiksa atomik supaya dua worker tidak lolos bersamaan.
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -209,6 +254,21 @@ func (e *Engine) Abort(incidentID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.running, incidentID)
+}
+
+// RiskOf mengembalikan level risk untuk sebuah aksi ("low" bila tidak dipetakan).
+func (e *Engine) RiskOf(action string) string {
+	if r, ok := e.riskLevels[action]; ok && r != "" {
+		return r
+	}
+	return "low"
+}
+
+// approvalRequirement mengembalikan (risk, wajibApproval) untuk sebuah aksi.
+func (e *Engine) approvalRequirement(action string) (string, bool) {
+	risk := e.RiskOf(action)
+	_, need := e.requireApproval[risk]
+	return risk, need
 }
 
 // reject mencatat penolakan ke observer (bila ada) lalu mengembalikan hasil.
