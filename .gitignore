@@ -1,0 +1,33 @@
+# Binaries
+faultpilot
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build
+bin/
+dist/
+
+# Go workspace
+*.sumdb
+go.work
+go.work.sum
+
+# DB / temp
+*.db
+*.db-shm
+*.db-wal
+/tmp/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Local
+.env
+ABOUT.md
