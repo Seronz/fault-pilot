@@ -159,3 +159,68 @@ func TestT12_ShutdownWhileFull(t *testing.T) {
 		t.Fatal("Push after Close must return false")
 	}
 }
+
+// Event yang gagal diproses harus bisa dicoba ulang dengan isi yang sama.
+func TestFailedEventCanBeRetried(t *testing.T) {
+	var calls atomic.Int64
+	proc := func(ctx context.Context, e domain.Event) error {
+		if calls.Add(1) == 1 {
+			return fmt.Errorf("boom")
+		}
+		return nil
+	}
+
+	c := collector.New(collector.DefaultBufferSize, collector.DefaultMaxConcurrent, proc, discardLogger())
+	defer c.Close()
+
+	e := domain.Event{Type: "alert", Service: "checkout", Message: "flaky"}
+	if !c.Push(e) {
+		t.Fatal("first push should be accepted")
+	}
+	waitFor(t, func() bool {
+		st, ok := c.Status(e)
+		return ok && st == collector.EventFailed
+	})
+
+	if !c.Push(e) {
+		t.Fatal("retry after failure must be accepted")
+	}
+	waitFor(t, func() bool {
+		st, ok := c.Status(e)
+		return ok && st == collector.EventDone
+	})
+
+	if got := c.Completed(); got != 1 {
+		t.Fatalf("want 1 completed event, got %d", got)
+	}
+	if got := c.Failed(); got != 1 {
+		t.Fatalf("want 1 failed event, got %d", got)
+	}
+	if got := c.Retried(); got != 1 {
+		t.Fatalf("want 1 retried event, got %d", got)
+	}
+}
+
+// Event yang sudah sukses (done) harus tetap dianggap duplikat.
+func TestDoneEventIsDeduplicated(t *testing.T) {
+	proc := func(ctx context.Context, e domain.Event) error { return nil }
+
+	c := collector.New(collector.DefaultBufferSize, collector.DefaultMaxConcurrent, proc, discardLogger())
+	defer c.Close()
+
+	e := domain.Event{Type: "alert", Service: "checkout", Message: "ok"}
+	if !c.Push(e) {
+		t.Fatal("first push should be accepted")
+	}
+	waitFor(t, func() bool {
+		st, ok := c.Status(e)
+		return ok && st == collector.EventDone
+	})
+
+	if c.Push(e) {
+		t.Fatal("duplicate of a done event must be rejected")
+	}
+	if got := c.Duplicates(); got != 1 {
+		t.Fatalf("want 1 duplicate, got %d", got)
+	}
+}

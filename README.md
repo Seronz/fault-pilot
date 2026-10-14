@@ -321,7 +321,7 @@ Detail arsitektur ada di [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md), [`docs/ARCH
 
 ## Fitur
 - **Fail-closed**: policy menolak proposal tidak valid, executor deadline + hold journal saat gagal.
-- **Bounded & dedup**: collector kanal 100, dedup by content, worker pool max 5.
+- **Bounded & dedup**: collector kanal 100, dedup by content, worker pool max 5. Event yang gagal diproses ditandai `failed` dan boleh di-retry (isi sama), sementara yang sukses (`done`) tetap dianggap duplikat.
 - **Safe proposal**: allowlist aksi/target, anti-double running, cooldown, limit per incident.
 - **Recoverable journal**: SQLite WAL + audit JSONL, reconcile state executing/pending -> unknown.
 - **Idempotent execution**: ActionJournal pakai IdempotencyKey.

@@ -6,7 +6,8 @@
 //     atau collector sudah ditutup, event ditolak (return false).
 //   - Bounded: jumlah event yang menunggu dibatasi oleh kapasitas kanal
 //     (default 100) sehingga pemakaian memori terkendali.
-//   - Dedup: event dengan isi sama hanya diterima sekali.
+//   - Dedup: event dengan isi sama hanya diproses sekali. Event yang GAGAL
+//     diproses boleh dicoba lagi lewat Push (lihat EventState).
 package collector
 
 import (
@@ -33,6 +34,16 @@ const (
 // menulis event ke store dan membuat/meng-update insiden.
 type Processor func(ctx context.Context, e domain.Event) error
 
+// EventState adalah status daur hidup sebuah event di peta dedup.
+type EventState string
+
+const (
+	EventPending EventState = "pending" // diterima, menunggu diproses
+	EventRunning EventState = "running" // sedang diproses worker
+	EventDone    EventState = "done"    // selesai diproses dengan sukses
+	EventFailed  EventState = "failed"  // gagal diproses; boleh dicoba ulang
+)
+
 // Collector menerima event dan memprosesnya secara asinkron.
 type Collector struct {
 	events  chan domain.Event // kanal terbatas berisi event yang belum diproses
@@ -40,9 +51,9 @@ type Collector struct {
 	process Processor         // callback pemrosesan event
 	log     *slog.Logger
 
-	mu   sync.Mutex          // melindungi peta dedup
-	seen map[string]struct{} // kunci dedup yang sudah diterima
-	seq  atomic.Uint64       // penghitung untuk membangkitkan ID event
+	mu   sync.Mutex            // melindungi peta dedup
+	seen map[string]EventState // kunci dedup -> status daur hidup event
+	seq  atomic.Uint64         // penghitung untuk membangkitkan ID event
 
 	ctx    context.Context // dibatalkan saat Close untuk membatalkan pekerjaan
 	cancel context.CancelFunc
@@ -50,8 +61,12 @@ type Collector struct {
 	once   sync.Once      // memastikan Close hanya dijalankan sekali
 	wg     sync.WaitGroup // menunggu goroutine consumer berhenti
 
-	accepted atomic.Uint64 // jumlah event yang diterima
-	dropped  atomic.Uint64 // jumlah event yang ditolak karena kanal penuh
+	accepted   atomic.Uint64 // jumlah event yang diterima ke antrean
+	dropped    atomic.Uint64 // jumlah event yang ditolak karena kanal penuh
+	duplicates atomic.Uint64 // jumlah event yang ditolak karena duplikat
+	retried    atomic.Uint64 // jumlah event gagal yang dicoba ulang
+	completed  atomic.Uint64 // jumlah event yang selesai diproses
+	failed     atomic.Uint64 // jumlah event yang gagal diproses
 }
 
 // New membuat Collector baru dan langsung menjalankan goroutine consumer.
@@ -81,7 +96,7 @@ func New(size, maxConcurrent int, process Processor, logger *slog.Logger) *Colle
 		pool:    worker.New(maxConcurrent),
 		process: process,
 		log:     logger,
-		seen:    make(map[string]struct{}),
+		seen:    make(map[string]EventState),
 		ctx:     ctx,
 		cancel:  cancel,
 		done:    make(chan struct{}),
@@ -94,11 +109,12 @@ func New(size, maxConcurrent int, process Processor, logger *slog.Logger) *Colle
 // Push mencoba memasukkan satu event ke antrean.
 //
 // Fungsi mengembalikan true bila event diterima, dan false bila:
-//   - event merupakan duplikat dari yang sudah pernah diterima, atau
+//   - event duplikat dari event yang berstatus pending/running/done, atau
 //   - kanal sedang penuh, atau
 //   - collector sudah ditutup.
 //
-// Push tidak pernah memblokir pemanggil.
+// Event yang berstatus EventFailed (gagal diproses sebelumnya) akan diterima
+// kembali sehingga bisa dicoba ulang. Push tidak pernah memblokir pemanggil.
 func (c *Collector) Push(e domain.Event) bool {
 	// Bangkitkan ID event bila belum ada, dengan format "ev-000001".
 	if e.ID == "" {
@@ -106,14 +122,19 @@ func (c *Collector) Push(e domain.Event) bool {
 	}
 	key := dedupKey(e)
 
-	// Tandai sudah diterima lebih dulu agar request duplikat yang datang
-	// bersamaan ikut terbuang.
+	// Kelola status dedup lebih dulu agar request duplikat yang datang
+	// bersamaan ikut terbuang. Event yang sebelumnya GAGAL boleh dicoba lagi;
+	// selain itu (pending/running/done) dianggap duplikat.
 	c.mu.Lock()
-	if _, ok := c.seen[key]; ok {
-		c.mu.Unlock()
-		return false
+	if st, ok := c.seen[key]; ok {
+		if st != EventFailed {
+			c.mu.Unlock()
+			c.duplicates.Add(1)
+			return false
+		}
+		c.retried.Add(1)
 	}
-	c.seen[key] = struct{}{}
+	c.seen[key] = EventPending
 	c.mu.Unlock()
 
 	// Tolak lebih awal bila collector sudah ditutup.
@@ -124,8 +145,8 @@ func (c *Collector) Push(e domain.Event) bool {
 	default:
 	}
 
-	// Kirim tanpa memblokir; bila penuh, kembalikan tanda dedup agar event
-	// bisa dicoba lagi di masa depan.
+	// Kirim tanpa memblokir; bila penuh, buang kunci dedup agar event bisa
+	// dicoba lagi di masa depan.
 	select {
 	case c.events <- e:
 		c.accepted.Add(1)
@@ -147,11 +168,26 @@ func (c *Collector) run() {
 			return
 		case e := <-c.events:
 			ev := e
-			c.pool.Submit(c.ctx, func() {
+			key := dedupKey(ev)
+			ok := c.pool.Submit(c.ctx, func() {
+				c.setState(key, EventRunning)
 				if err := c.process(c.ctx, ev); err != nil {
+					c.setState(key, EventFailed)
+					c.failed.Add(1)
 					c.log.Error("process event failed", "event_id", ev.ID, "err", err)
+					return
 				}
+				c.setState(key, EventDone)
+				c.completed.Add(1)
 			})
+			if !ok {
+				// Submit ditolak (context dibatalkan / pool ditutup): event
+				// tidak diproses. Tandai gagal agar tidak dianggap selesai dan
+				// tetap bisa dicoba ulang.
+				c.setState(key, EventFailed)
+				c.failed.Add(1)
+				c.log.Error("submit event failed", "event_id", ev.ID)
+			}
 		}
 	}
 }
@@ -198,11 +234,43 @@ func (c *Collector) Healthy(ctx context.Context) error {
 	}
 }
 
-// Accepted mengembalikan total event yang diterima.
+// Accepted mengembalikan total event yang diterima ke antrean.
 func (c *Collector) Accepted() uint64 { return c.accepted.Load() }
 
 // Dropped mengembalikan total event yang ditolak karena kanal penuh.
 func (c *Collector) Dropped() uint64 { return c.dropped.Load() }
+
+// Duplicates mengembalikan total event yang ditolak karena duplikat.
+func (c *Collector) Duplicates() uint64 { return c.duplicates.Load() }
+
+// Retried mengembalikan total event gagal yang dicoba ulang.
+func (c *Collector) Retried() uint64 { return c.retried.Load() }
+
+// Completed mengembalikan total event yang selesai diproses dengan sukses.
+func (c *Collector) Completed() uint64 { return c.completed.Load() }
+
+// Failed mengembalikan total event yang gagal diproses; event seperti ini
+// masih boleh dicoba ulang lewat Push.
+func (c *Collector) Failed() uint64 { return c.failed.Load() }
+
+// Status mengembalikan status daur hidup terakhir untuk event dengan isi sama.
+// ok bernilai false bila event belum pernah diterima.
+func (c *Collector) Status(e domain.Event) (st EventState, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok = c.seen[dedupKey(e)]
+	return st, ok
+}
+
+// setState memperbarui status dedup sebuah key. Bila key sudah dibuang, tidak
+// ada yang dilakukan agar status event lama tidak hidup kembali.
+func (c *Collector) setState(key string, st EventState) {
+	c.mu.Lock()
+	if _, ok := c.seen[key]; ok {
+		c.seen[key] = st
+	}
+	c.mu.Unlock()
+}
 
 // forget menghapus kunci dedup, dipakai saat event gagal dikirim ke kanal.
 func (c *Collector) forget(key string) {
